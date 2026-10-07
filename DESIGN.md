@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 502, 2026-10-07):
+  Synced from the maitred design doc on claude.ai (rev 503, 2026-10-07):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -202,6 +202,8 @@ tests       | ^(bin/)?(rspec|cargo +test)( |$) | none    | the suite is short; r
 - **Unlisted commands are quiet,** the most restrictive class: a wrong guess in that direction costs only waiting.
 - **A row without a `why` makes the file invalid.** maitred then treats every command as quiet and says why, rather than guess.
 - **`caffeinate` anywhere in the argv is refused,** whatever the row says.
+
+**Rules can carry options, validated like everything else in the file.** Besides the checker and the reservation, a rule says what happens to processes its job leaves behind when the job's main process exits: stopped (the default), or kept running, for a job such as an end-to-end test that starts a server it means to leave up. Kept processes stop being the ticket's, but the sampler still counts them as load maitred didn't admit. The command line can move an option only in its stricter direction, as with `--class`.
 
 **Review protects the shared branch; locally, nothing is hidden.** maitred reads the class file as committed on the repository's default branch (configurable), never the working tree. Review is what protects the branch everyone shares. On one machine, a local commit or a moved ref could bypass review, so maitred makes that visible rather than claiming to prevent it: it warns whenever the local default branch is ahead of its upstream. To test a change locally, `--classes <path>` or `$MAITRED_CLASSES` points at an unreviewed file: every run under it prints a warning, its record is marked `unreviewed-classes`, and `maitred status` shows it, so the override is easy to use and impossible to miss. A project outside git gets the same treatment. The CLI offers `classes check` (validate a file) and `classes propose` (draft a change for a pull request), never an apply step. A checker is code agents can edit, so its output never goes below the machine config's minimums, and the live limits, not the checker, keep the machine safe.
 
