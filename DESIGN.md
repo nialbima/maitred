@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 397, 2026-10-07):
+  Synced from the maitred design doc on claude.ai (rev 398, 2026-10-07):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -253,6 +253,7 @@ Candidate features, from prior art:
 | An external admission hook (exit 0 start, 1 hold, 2 kill youngest) | parallel `--limit` | later, only if it runs in the waiting process |
 | Opt-in power assertion for one job's lifetime | `caffeinate -i`, `-w` | later, explicit flag only; no tool does this on request today |
 | Backfill by expected runtime | Slurm | no: needs runtime history first |
+| GPU as the first named resource: reserve gpu=1 (or GPU memory), with the sampler reading GPU use for the live floor. For local model inference and ML training, now common jobs | Slurm GRES, task-spooler -G | roadmap, after v1. Linux/NVIDIA reads it through NVML; on Apple Silicon GPU memory is the shared pool the memory floor already watches, and utilisation needs powermetrics (root), which the sampler shouldn't need |
 
 **Telemetry is OpenTelemetry data from the start.** Every sample the sampler takes, and every result, is stored as OTel metric data points, one JSON object per line: resource attributes (`host.name`, `os.type`, `host.arch`), metric name, unit, value and timestamp, with names from OTel's host-metrics conventions (`system.cpu.utilization`, `system.memory.usage`, `system.cpu.load_average.1m`) and a `maitred.*` namespace for its own (`maitred.queue.waiting`, `maitred.job.duration`). `maitred export` turns the history into OTLP-JSON with no translation, so any OTel collector can take it, and every machine's data has the same shape by construction. Prometheus's textfile format was ruled out: it carries no timestamps.
 
