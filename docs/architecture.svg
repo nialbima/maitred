@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 540" role="img" aria-label="Only the sampler reads the machine, and it runs no jobs" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <!-- Exported from the architecture drawing in the maitred design doc. Keep the two in step. -->
+  <style>
+    .bg { fill: #ffffff; }
+    .ink { fill: #1d1d1b; }
+    .quiet { fill: #5f5f5a; }
+    .box { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .chip { fill: none; stroke: #a3a39a; stroke-width: 1; }
+    .rule { stroke: #e4e4de; }
+    .accent { fill: #2f6fd6; fill-opacity: 0.12; stroke: #2f6fd6; stroke-width: 2; }
+    .wire { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .head { fill: #a3a39a; }
+    .name { font-weight: 600; }
+    .small { font-size: 11.5px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .ink { fill: #ececea; }
+      .quiet { fill: #a9a9a3; }
+      .box, .chip, .wire { stroke: #8a8a82; }
+      .rule { stroke: #3a3a36; }
+      .accent { fill: #6aa0ff; stroke: #6aa0ff; }
+      .head { fill: #8a8a82; }
+    }
+  </style>
+  <defs>
+    <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="head" d="M0 0L10 5L0 10z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="760" height="540"/>
+
+  <text class="ink name" x="24" y="34" font-size="15">Only the sampler reads the machine, and it runs no jobs</text>
+
+  <text class="quiet"><tspan x="24" y="92">One per</tspan><tspan x="24" y="108">machine</tspan></text>
+  <text class="quiet" x="24" y="212">Shared state</text>
+  <text class="quiet"><tspan x="24" y="384">Inside each</tspan><tspan x="24" y="400">worker's process</tspan></text>
+  <line class="rule" x1="24" x2="736" y1="150" y2="150"/>
+  <line class="rule" x1="24" x2="736" y1="280" y2="280"/>
+
+  <g>
+    <rect class="accent" x="176" y="60" width="560" height="72" rx="8"/>
+    <text class="ink name" x="192" y="84">maitred watch, the sampler</text>
+    <text class="ink small" x="192" y="104">reads load, memory and processes every few seconds</text>
+    <text class="ink small" x="192" y="120">writes only the load files; never runs or stops a job</text>
+  </g>
+
+  <g>
+    <rect class="box" x="176" y="168" width="560" height="96" rx="8"/>
+    <text class="ink name" x="192" y="192">Machine state ($MAITRED_ROOT): one writer per file</text>
+    <rect class="chip" x="192" y="216" width="96" height="32" rx="8"/>
+    <rect class="chip" x="300" y="216" width="96" height="32" rx="8"/>
+    <rect class="chip" x="408" y="216" width="96" height="32" rx="8"/>
+    <rect class="chip" x="516" y="216" width="96" height="32" rx="8"/>
+    <rect class="chip" x="624" y="216" width="96" height="32" rx="8"/>
+    <text class="ink small" x="240" y="236" text-anchor="middle">admit.lock</text>
+    <text class="ink small" x="348" y="236" text-anchor="middle">tickets/</text>
+    <text class="ink small" x="456" y="236" text-anchor="middle">cancel/</text>
+    <text class="ink small" x="564" y="236" text-anchor="middle">history.jsonl</text>
+    <text class="ink small" x="672" y="236" text-anchor="middle">now.json</text>
+  </g>
+
+  <g>
+    <rect class="box" x="176" y="296" width="272" height="192" rx="8"/>
+    <text class="ink name" x="192" y="320">Worker A</text>
+    <rect class="box" x="192" y="336" width="240" height="56" rx="8"/>
+    <text class="ink name" x="208" y="360">maitred -- make release</text>
+    <text class="quiet small" x="208" y="378">admitted, heavy; supervises the job</text>
+    <rect class="box" x="192" y="416" width="240" height="56" rx="8"/>
+    <text class="ink name" x="208" y="440">make release</text>
+    <text class="quiet small" x="208" y="458">its own process group</text>
+  </g>
+
+  <g>
+    <rect class="box" x="464" y="296" width="272" height="192" rx="8"/>
+    <text class="ink name" x="480" y="320">Worker B</text>
+    <rect class="box" x="480" y="336" width="240" height="56" rx="8"/>
+    <text class="ink name" x="496" y="360">maitred -- bin/bench</text>
+    <text class="quiet small" x="496" y="378">waiting, quiet; position 2</text>
+    <rect class="box" x="480" y="416" width="240" height="56" rx="8" stroke-dasharray="4 4"/>
+    <text class="quiet name" x="496" y="440">bin/bench</text>
+    <text class="quiet small" x="496" y="458">starts once admitted</text>
+  </g>
+
+  <g>
+    <path class="wire" d="M672 132V216" marker-end="url(#arch-arrow)"/>
+    <path class="wire" d="M400 336V264" marker-start="url(#arch-arrow)" marker-end="url(#arch-arrow)"/>
+    <path class="wire" d="M688 336V264" marker-start="url(#arch-arrow)" marker-end="url(#arch-arrow)"/>
+    <path class="wire" d="M312 392V416" marker-end="url(#arch-arrow)"/>
+    <path class="wire" d="M600 392V416" stroke-dasharray="4 4" marker-end="url(#arch-arrow)"/>
+  </g>
+
+  <text class="quiet small" x="176" y="516">When a job ends, its supervisor writes the record into the project's .maitred/ and exits.</text>
+</svg>
