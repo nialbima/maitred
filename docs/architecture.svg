@@ -54,8 +54,8 @@
     <rect class="chip" x="624" y="216" width="96" height="32" rx="8"/>
     <text class="ink small" x="240" y="236" text-anchor="middle">admit.lock</text>
     <text class="ink small" x="348" y="236" text-anchor="middle">tickets/</text>
-    <text class="ink small" x="456" y="236" text-anchor="middle">cancel/</text>
-    <text class="ink small" x="564" y="236" text-anchor="middle">history.jsonl</text>
+    <text class="ink small" x="456" y="236" text-anchor="middle">requests/</text>
+    <text class="ink small" x="564" y="236" text-anchor="middle">history/</text>
     <text class="ink small" x="672" y="236" text-anchor="middle">now.json</text>
   </g>
 
