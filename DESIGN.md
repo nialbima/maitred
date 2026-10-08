@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 503, 2026-10-07):
+  Synced from the maitred design doc on claude.ai (rev 519, 2026-10-07):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -19,16 +19,16 @@ maitred (pronounced "mate-urd") is a queue that only permits or defers jobs and 
 | job | The command a worker wants to run |
 | project | A repository, identified by its git common directory so every worktree of it is one project; outside git, the nearest directory holding `.maitred/` |
 | machine | The unit whose resources maitred rations: a host, or a container with its own resource limits. One queue per machine, shared by all its users |
-| ticket | A job's place in the queue: its class, reservation, project, label and state, and an id with a random part. It holds no command line |
+| ticket | A job's place in the queue: its class, reservation, project, label and state, what its job is using, and an id with a random part. It holds no command line |
 | class | How a job is treated: `light`, `heavy`, `quiet`, or `none` (not queued) |
-| class file | Reviewed per-project config saying which commands go through maitred, and in which class |
+| class file | Per-project config, committed in the repository, saying which commands go through maitred, and in which class |
 | reservation | The cores and memory a job is assumed to use while it runs (other named resources can come later) |
 | admission | The decision that a waiting ticket may start now |
-| live limits | Measured free memory below a floor, or CPU use above a ceiling, past which nothing starts, whatever the reservations say |
+| live limits | Measured free memory below a floor, or CPU or GPU use above a ceiling, past which nothing starts, whatever the reservations say. Lower kill thresholds below them stop jobs |
 | quiet | The class for jobs that need an otherwise idle machine, such as benchmarks |
-| supervisor | The maitred process that waits for a ticket, then runs and watches its job. It is the worker's own process |
-| sampler | `maitred watch`, the one process that reads the machine's load and publishes it. It never runs or stops a job |
-| machine config | The machine's own settings, owned by its administrators: capacity, live limits, minimum reservations and the other numbers. It always wins over a project |
+| supervisor | The maitred process that waits for a ticket, then runs, measures and watches its job. It is the worker's own process |
+| sampler | `maitred watch`, the one process that reads the whole machine's load and publishes it, as its own unprivileged user. It never runs or stops a job |
+| machine config | The machine's own settings, owned by its administrators: capacity, live limits, kill thresholds, minimum reservations and the other numbers. It always wins over a project |
 | orphan | A ticket whose supervisor has gone: a crash, a closed session, a reboot. Never marked as such; any reader sees that its lock is free |
 | adoption | A worker taking over its own project's orphan with `maitred wait`, after a person confirms, and becoming its supervisor |
 | record | What maitred keeps about a finished run, in the project: exit status, timings, how it ended, the load samples around it, and a capped copy of its output if asked. `maitred result` prints it |
@@ -54,7 +54,7 @@ maitred must:
 
 **The sampler observes, maitred decides, and every job runs and dies inside the process that asked for it, in that process's sandbox.**
 
-The threat is not a hostile outsider. It is an agent that means well and takes a shortcut: claims a light class to skip the queue, edits a script the queue trusts, or wraps a job to keep the machine awake. The design has to hold when that happens.
+The threat is not a hostile outsider. It is an agent that means well and takes a shortcut: claims a light class to skip the queue, edits a script the queue trusts, runs a heavy command without maitred, or wraps a job to keep the machine awake. The design has to hold when that happens. A deliberately hostile agent, one that forges maitred's own files, is out of scope for now: agents running as the same user can't be walled off from each other's files without a daemon. What the design does instead is keep what an agent can touch small: the sampler runs as its own user and owns the load files, and a sandbox is given write access only to the tickets and requests directories.
 
 **No process outside the sandbox runs a submitted job.** A daemon that executes queued commands runs them with its own rights, without the sandbox and without a permission prompt. An allowlist does not close that: an allowed command still runs code agents write (a build of any branch, a script in the repository). So every off-the-shelf queue that executes jobs from a daemon is ruled out:
 
@@ -65,9 +65,9 @@ The threat is not a hostile outsider. It is an agent that means well and takes a
 | GNU parallel `sem --load` | Waiter-side and load-aware, but no visible queue, no classes, no ordering guarantee |
 | macOS `batch` / atrun | Load-aware, but off by default and enabled through a root launchd job |
 
-**One process reads the machine: the sampler.** It exists so that workers never need system-introspection tools (`ps`, `top`, `pmset`, `/proc`) at all; a sandbox that hides them is one reason to want that, not the only one. It publishes what it reads to the load files, executes nothing it is given and stops nothing, so whether it runs inside a sandbox or not, it gives no worker more power.
+**One process reads the machine: the sampler.** It exists so that workers never need system-introspection tools (`ps`, `top`, `pmset`, `/proc`) to see the machine; a sandbox that hides them is one reason to want that, not the only one. A supervisor reads only its own job's processes. The sampler publishes what it reads to the load files, executes nothing it is given and stops nothing, and runs as its own unprivileged user, never root, so it gives no worker more power.
 
-**Safety never rests on data an agent can edit.** A job's class orders the queue; the live load decides whether anything may start. A wrong class can cost a slower queue or a spoiled timing, not an overloaded machine.
+**Safety rests on measurements, not on claims.** A job's class and reservation order the queue; what may start, and what must stop, is decided by the machine's load as the sampler measures it under its own user, which no agent can write. Each supervisor also measures its own job and writes the figures into its own ticket; those figures choose a victim and refine what counts as free, but never lift a live limit. A wrong class or a wrong figure can cost a slower queue, a spoiled timing or the wrong victim; if the machine carries more than the live limits allow, the kill policy stops jobs until it fits.
 
 ## Architecture
 
@@ -78,20 +78,20 @@ maitred supports two modes:
 
 ![maitred architecture: one sampler per machine, one supervisor per job, one writer per file](docs/architecture.svg)
 
-Each supervisor writes only its own ticket and reads everyone else's; the sampler writes only the load files.
+Each supervisor writes only its own ticket, including what its job is using, and reads everyone else's; the sampler writes only the load files.
 
 A job's life:
 
 1. **Enqueue.** The worker starts `maitred -- <cmd>` and waits on it. The supervisor matches the command against the project's class file, creates its own ticket file in the machine state, and locks it for as long as it lives.
 2. **Wait.** Every few seconds, in its own process: take admit.lock, read every ticket and the load file, run the admission function, release. The model is not involved.
-3. **Run.** Once admitted, the supervisor marks its own ticket admitted and starts the command in a new process group, still inside the worker's sandbox.
+3. **Run.** Once admitted, the supervisor marks its own ticket admitted and starts the command in a new session, still inside the worker's sandbox. While it runs, the supervisor measures it, writes the figures into its ticket and watches for the kill thresholds.
 4. **Finish.** The supervisor writes the record into the project's .maitred/ (exit status, times, sleep, any kill), deletes its own ticket and exits with the job's status. The worker gets that status as if it had run the command itself.
 
 ## State on disk
 
-State lives in two places, and neither knows where a job's output goes. **Machine state** holds only what coordination needs: one small file per live ticket, requests addressed to tickets, and the sampler's files. **Project state** (`.maitred/` in each project) holds that project's class file and its records. Every user of the machine can read the machine state, so a ticket carries no command line or working directory; those go only into the project's record, readable by its owner.
+State lives in two places, and neither knows where a job's output goes. **Machine state** holds only what coordination needs: one small file per live ticket, requests addressed to tickets, and the sampler's files. **Project state** holds the project's class file, committed in the repository, and its records, kept in the repository's git directory so every worktree shares them and git never tracks them. Every user of the machine can read the machine state, so a ticket carries no command line or working directory; those go only into the project's record, readable by its owner.
 
-The machine root is shared by every user of the machine, because they share its resources: a sticky, world-writable directory by default (configurable), much like `/tmp`. It must sit on a local filesystem. File locks over NFS, or across a VM's file-sharing bridge, are not reliable, so maitred refuses a network filesystem at startup. It is persistent on purpose: **queued work survives a reboot**, so a worker resumed after one does not have to enqueue everything again.
+The machine root is shared by every user of the machine, because they share its resources. `maitred install machine` creates it, run once by an administrator, together with a dedicated, unprivileged maitred user that the sampler runs as. That user owns the root and the load files; workers can write only the tickets and requests directories, and a sandbox is given write access to those two and nothing else. Every file and directory has a stated owner and mode, and nothing in the machine state shows another user's command lines or processes beyond their queue entries. The root's location is fixed per platform (`/Users/Shared/maitred` on macOS, `/var/lib/maitred` on Linux); only test builds can move it. It must sit on a local filesystem: file locks over NFS, or across a VM's file-sharing bridge, are not reliable, so maitred refuses a network filesystem at startup. It is persistent on purpose: **queued work survives a reboot**, so a worker resumed after one does not have to enqueue everything again.
 
 ```
 <machine root>/              one per machine
@@ -104,17 +104,17 @@ The machine root is shared by every user of the machine, because they share its 
 ```
 
 ```
-<project>/.maitred/          one per project
-  classes                     the class file (read from the default branch)
-  records/<id>/               the record and the capped log (gitignored, owner-only)
+<project>/.maitred/classes                 the class file (read as committed on the local default branch)
+<git common dir>/maitred/id                the project's random id
+<git common dir>/maitred/records/<id>/     the record and the capped log (owner-only)
 ```
 
 | File | Holds | Written by |
 | --- | --- | --- |
-| ticket | id, queue position, project, class, reservation, label, state (waiting, or admitted with its process group), time waited | its supervisor |
+| ticket | id, queue position, project, class, reservation, label, state (waiting, admitted with its process group, or stopping), what its job is using, time waited | its supervisor |
 | request | the ticket it targets, cancel or update, the change, the sender (worker, project, user) and a reason | its sender |
-| record | the ticket's fields plus command line, working directory, start and end, exit status, sleep, how it ended and any request applied, the load samples around it, the capped log | its supervisor, when the job ends |
-| `load/now.json` | when sampled, load, CPU use, free memory, processes by group, sleep assertions | the sampler |
+| record | the ticket's fields plus command line, working directory, the class file's commit, start and end, exit status, sleep, how it ended and any request applied, the load samples around it, the capped log | its supervisor, when the job ends |
+| `load/now.json` | when sampled, load, CPU use, free memory and memory pressure, GPU use where readable, sleep assertions | the sampler |
 
 **maitred keeps a record of the run, never the job's output.** In a record, `exit` is the exit status and `log` is a copy of stdout and stderr. The job's real output goes wherever its own command sends it, relative to its own working directory, exactly as without maitred. Output streams through to the worker as usual; the copy in `log` is capped (configurable), or off.
 
@@ -134,7 +134,7 @@ Two of these load things that are not cores or memory: connections to one databa
 
 **Order without a shared clock.** Tickets are ordered by a logical sequence each new ticket takes under `admit.lock`, not by wall-clock time, so a host and a VM whose clocks disagree still agree on the order. Ids carry a random part, so two pid namespaces sharing a machine root can't produce the same one. Each supervisor measures its own waiting time on its own clock.
 
-**Orphans and adoption.** An orphan is computed, never written: a ticket whose lock is free. It keeps its last state, so a reader can see what it was doing (waiting, or running with which process group), for which project, and for how long. Orphans keep their place in the queue but every admission rule skips them, except a running orphan whose process group is still alive, which keeps its reservation. Adoption is `maitred wait <id>` from the same project, after a person confirms, and only if the command still matches the project's class file. A job that was running when its supervisor died is never restarted silently; adopting it re-queues it.
+**Orphans and adoption.** An orphan is computed, never written: a ticket whose lock is free. It keeps its last state, so a reader can see what it was doing (waiting, or running with which process group), for which project, and for how long. Orphans keep their place in the queue but every admission rule skips them, except a running orphan whose process group is still alive, which keeps its reservation. Adoption is `maitred wait <id>` from the same project, after a person confirms, and only if the command still matches the project's class file. It is refused while the orphan's process group is still alive, since the job would then run twice. A job that was running when its supervisor died is never restarted silently; adopting it re-queues it.
 
 **Requests, not edits.** Cancelling or updating a ticket writes a request beside it, carrying the sender and a reason; the ticket's own supervisor applies it, and the record shows it. A worker may cancel or update its own project's tickets; anyone else's needs a person.
 
@@ -142,42 +142,42 @@ Two of these load things that are not cores or memory: connections to one databa
 
 ## Admission
 
-Every waiting supervisor runs the same pure function over the same state, under `admit.lock`, and starts its job only when that function admits its own ticket; nobody else picks.
+Every waiting supervisor runs the same pure function over the same state, under `admit.lock`, and starts its job only when that function admits its own ticket; nobody else picks. The exact algorithm is in the architecture doc; these are the rules it keeps.
 
-| Class | Admitted when | Under high load |
+| Class | Allowed to start when | Under high load |
 | --- | --- | --- |
-| light | its reservation fits the budget, and no quiet ticket is running or due | waits on the budget and the live limits |
-| heavy | its reservation fits, fewer heavy jobs run than the class's `max_running`, and the settle time has passed | bumped: light jobs behind it may pass |
-| quiet | nothing admitted by maitred is running, and load has stayed under the quiet threshold for two samples in a row | waits for the machine to settle |
+| light | its reservation fits what is free | waits on the budget and the live limits |
+| heavy | its reservation fits, fewer heavy jobs run than the class's `max_running`, and the settle time has passed | waits; lighter jobs behind it may pass |
+| quiet | nothing admitted by maitred is running, and the machine has stayed quiet for a few samples; or it has waited past `quiet_max_wait`, and then runs on the first empty queue with its record marked tainted | waits for the machine to settle |
 
-One pass of the function, in order:
+- **The live limits always win.** Free memory under the floor, or CPU or GPU use over its ceiling, starts nothing, whatever the reservations say.
+- **No reliable load, one at a time.** If the load file is stale, or a critical reading (CPU, memory) is missing, admission falls back to one job at a time. It never waits forever on a missing number.
+- **What is free** is measured free capacity, minus what admitted jobs have reserved but aren't using yet. A job whose supervisor hasn't reported its use holds its whole reservation.
+- **Queue order is kept, with backfill.** Tickets are considered in queue order. A ticket that has waited past the aging time, and that only the budget is keeping out (not its class's rules), holds its reservation out of what is free, so later, smaller jobs can only fill around it, and it starts as soon as that space is really free.
+- **Nobody waits on their own size.** When nothing maitred admitted is running, the first ticket its class allows gets in even if its reservation exceeds the budget. It never overrides a class rule or the live limits.
+- **A stalled waiter doesn't block.** A waiting ticket whose supervisor has stopped running passes (stopped by Ctrl-Z, or stuck) neither takes budget nor blocks anyone until it runs again.
 
-1. **Freshness.** A load file older than a few sample intervals (machine config) means the sampler is down. maitred then falls back to what a plain lock does: one job at a time, of any class.
-2. **Live limits.** Free memory under the floor, or CPU use over the ceiling, admits nothing. This step ignores classes and always wins.
-3. **Orphans.** Every later step skips orphans, except a running orphan whose process group is still alive, which keeps its reservation.
-4. **Barriers.** A running quiet job admits nothing else. A due quiet ticket (at the head of the queue, or waiting past the aging time) and a heavy ticket waiting past the aging time each stop admission of everything behind them; when both exist, the earlier in the queue goes first.
-5. **Walk the tickets in queue order** against a budget: capacity minus the reservations of admitted jobs minus external use (measured use less maitred's own process groups). Admit each ticket its class rule allows.
-6. **Nobody waits on their own size.** When nothing maitred admitted is running, the first ticket in the walk gets in even if its reservation exceeds the budget, but never past the live limits. A reservation larger than the machine is clamped to capacity, so it needs an otherwise empty machine.
+**Reservations stop the thundering herd, and nothing a project writes can lower them.** A job takes seconds to ramp up and show in the samples, so ten waiters reading the same quiet snapshot would all start. An admitted job's reservation counts against the budget the moment it is admitted, before any load shows. The machine config sets a minimum reservation per class; a class file or checker can raise a reservation above it, never lower it.
 
-**Reservations stop the thundering herd, and nothing a project writes can lower them.** Load lags by about a minute, so ten waiters reading the same quiet snapshot would all start. An admitted job's reservation counts against the budget the moment it is admitted, before any load shows. The machine config sets a minimum reservation per class; a class file or checker can raise a reservation above it, never lower it.
+**Settle.** Heavy starts are spaced so each one's ramp-up shows in the samples before the next starts. Getting settle and the minimums right together is the hardest part of admission, and is specified in the architecture doc.
 
-**Settle.** Heavy starts are spaced so the measurements catch up: the settle time runs from the last heavy admission the sampler observed, which it records as it watches the tickets. Getting settle and the minimums right together is the hardest part of admission, and is specified in the architecture doc.
+**Where reservations come from.** A class-file rule gives a fixed reservation, or names a checker command that prints one (`<class> [cpu=<cores>] [mem=<size>]`) from what the project knows about the job. A ticket without one reserves its class default, and every reservation is at least its class minimum.
 
-**Where reservations come from.** A class-file entry gives a fixed reservation, or names a checker command that prints one from what the project knows about the job (a dataset's measured cost, the size of its input). A ticket without one reserves its class default, and every reservation is at least its class minimum.
-
-**The machine config** holds the numbers: capacity, the live limits, the quiet threshold, settle and aging times, freshness in sample intervals, and per class a minimum reservation, a default reservation and `max_running`. It is owned by the machine's administrators, always wins over what a project claims, and starts with values measured on the machine (the sampler runs observe-only first). A project's class file is validated where it is used: at enqueue, by `classes check`, in CI; never by the sampler.
+**The machine config** holds the numbers: capacity, the live limits and kill thresholds for memory, CPU and GPU, the quiet threshold, settle, aging and `quiet_max_wait`, freshness in sample intervals, and per class a minimum reservation, a default reservation and `max_running`. It is owned by the machine's administrators, always wins over what a project claims, and starts with values measured on the machine (the sampler runs observe-only first). A project's class file is validated where it is used: at enqueue, by `classes check`, in CI; never by the sampler.
 
 ## Supervision
 
 Each supervisor is the parent of its own job: it starts it, passes signals to it, records how it ended, and is the only process that may kill it.
 
-- **Own session.** The job runs in a new session and process group, so a signal reaches everything it started and nothing outside can join it. It does not inherit the ticket's lock: if it did, a daemon the job left behind (a file watcher, a preloader server) would keep the ticket looking alive.
-- **Signals.** TERM, INT and HUP sent to the supervisor go to the job's group; after a grace period the supervisor sends KILL. A caller's timeout or Ctrl-C therefore stops the job and frees its reservation.
-- **Nesting.** A job that itself calls maitred runs straight through only when the caller is inside the session of a currently admitted ticket. A session can't be joined from outside, so this can't be forged, as an environment variable could.
-- **The whole tree.** A reservation covers everything the job starts. The sampler measures each admitted session's use against its reservation and reports overuse in `status` and the record. Processes that leave the session on purpose (daemons that call setsid) escape that measurement; containing them is platform-specific (cgroups on Linux) and an architecture question.
+- **Own session.** The job runs in a new session led by a small maitred holder process, which stays until the job's processes are gone. So a signal reaches everything the job started, nothing outside can join it, and Ctrl-Z or a closing terminal reaches the job the way it would without maitred. Neither the holder nor the job inherits the ticket's lock: if they did, a daemon the job left behind (a file watcher, a preloader server) would keep the ticket looking alive.
+- **Signals.** TERM, INT, HUP and QUIT sent to the supervisor go to the job's group, and stopping or resuming the supervisor (Ctrl-Z, fg) stops or resumes the job; after a grace period the supervisor sends KILL. A caller's timeout or Ctrl-C therefore stops the job and frees its reservation.
+- **Nesting.** A job that itself calls maitred is still classified; it runs straight through, inside its parent's reservation, only when the caller is inside the session of a currently admitted ticket and its class is no stricter than its parent's. A stricter nested command is refused with a message saying why. A session can't be joined from outside, so this can't be forged, as an environment variable could. Nested runs count as the parent's use, so a parent that fans out past its reservation shows as overuse and is the first victim of the kill policy. A process that left the job's session (a daemon that called setsid) is not nested: it queues like any other job, and if the job waits on it, `--timeout` is what ends the wait.
+- **The whole tree.** A reservation covers everything the job starts. The supervisor measures its own job's session, which runs as the same user and so is readable without privileges, writes the figures into its ticket on every pass, and reports overuse in `status` and the record. Processes that leave the session on purpose escape that measurement; they still show in the sampler's machine totals as load nobody admitted, and containing them is platform-specific (cgroups on Linux).
 - **Orphaned processes.** If the supervisor itself is killed with KILL, its job can outlive it. The ticket records the process group, and admission keeps that ticket's reservation for as long as the group still exists, so the budget stays honest. A supervisor can't signal another session's processes from inside a sandbox; `maitred status` lists the group for a person to stop.
 
-**Kill policy (after queueing works).** While its job runs, each supervisor reads the load file on every poll. When free memory falls below the kill floor, which sits below the admission floor, every supervisor runs the same pure function to choose one victim: the most recently admitted heavy job, then light, and a quiet job only below a critical floor. Only the victim's own supervisor acts: TERM to its group, KILL after the grace period, a record marked `killed: memory floor`. Nothing retries automatically.
+**Kill policy.** Below the live limits sit kill thresholds for free memory, CPU use and GPU use; other signals (database locks, timeouts) can be added later. When a fresh sample crosses one, each running supervisor, on its next pass, takes `admit.lock` and runs the same pure function to choose one victim. For memory and CPU it is the job furthest over its reservation on that resource, then the most recently admitted heavy job, then light, and a quiet job only past a critical threshold; v1 has no per-job GPU figure, so a GPU breach goes straight to the recency order. Only the victim's own supervisor acts on the answer: it marks its ticket `stopping`, sends TERM to its group, KILL after the grace period, and keeps the ticket as `stopping` until the sampler has published a sample taken after the kill, so the next choice sees the machine without it. Then it writes a record naming the threshold (`killed: memory`, `killed: cpu`, `killed: gpu`). While a living ticket is `stopping`, nobody chooses another victim, so one breach stops one job at a time; a `stopping` ticket whose supervisor died doesn't hold the policy up. Nothing is killed on a stale sample. A victim whose supervisor isn't running its passes (stopped, or stuck) is skipped and listed in `status` for a person. CPU trips only after staying over its threshold for several samples: a build saturating every core is normal, and only sustained saturation starves the machine. Nothing retries automatically.
+
+**The job keeps a working terminal, and maitred still keeps its log.** When the caller is a terminal, the job runs on a pseudo-terminal that maitred relays to and from the caller and copies into the log, the way `script` and tmux do: colour, progress bars, password prompts, Ctrl-C, Ctrl-Z and window resizing all behave as they would without maitred, and the caller's terminal settings are restored on every way out. When the caller is not a terminal (an agent harness, CI, a pipe), the job gets pipes, which is what it would have had anyway, and maitred copies them into the log. Processes a rule keeps alive after the job ends are not cut off: a small drain keeps logging their output until they close it.
 
 **Sleep.** maitred never keeps the machine awake. It records how long the machine slept during the job by comparing a clock that stops in sleep with one that doesn't (`mach_absolute_time` and `mach_continuous_time` on macOS; Linux's pair is under Platforms). A quiet job that slept gets a record marked tainted, because its timing can't be trusted.
 
@@ -185,27 +185,26 @@ Each supervisor is the parent of its own job: it starts it, passes signals to it
 
 Each adopting project has one class file, kept in its repository and changed by pull request like any other reviewed config. It says which commands must go through maitred, and in which class.
 
-A hook that forces heavy commands through maitred (Claude Code's PreToolUse, a shell wrapper) reads the same file, so "must be queued" and "in which class" never drift apart. The file is `.maitred/classes` at the root of the project's repository. Each row is `name | pattern | class | why`, with an optional `| checker`:
+A hook that forces heavy commands through maitred (Claude Code's PreToolUse, a shell wrapper) reads the same file, so "must be queued" and "in which class" never drift apart. The file is `.maitred/classes` at the root of the project's repository. Each row is `name | pattern | class | why`, with an optional fifth field of options:
 
 ```
-# name      | pattern                          | class   | why
-mutation    | ^(bin/)?mutant +run( |$)          | heavy   | every core for hours
-benchmark   | ^bin/bench( |$)                  | quiet   | its output is a timing; other load makes it wrong
+# name      | pattern                          | class   | why                                       | options
+mutation    | ^(bin/)?mutant +run( |$)          | heavy   | every core for hours                      | cpu=8 mem=6G
+benchmark   | ^bin/bench( |$)                  | quiet   | its output is a timing; load spoils it
 release     | ^make +release( |$)              | heavy   | a full optimised build on every core
-dataset     | ^bin/process-dataset( |$)        | checker | cost depends on the dataset | bin/dataset-cost
+dataset     | ^bin/process-dataset( |$)        | heavy   | cost depends on the dataset               | checker=bin/dataset-cost
+e2e         | ^bin/e2e( |$)                    | heavy   | starts a server the suite leaves up       | leftovers=keep
 tests       | ^(bin/)?(rspec|cargo +test)( |$) | none    | the suite is short; run it directly
 ```
 
-- **Matching.** A command loses its leading assignments and wrappers (`env`, `nice`, `time`, `timeout N`) before matching. The first matching row wins.
-- **Classes.** `light`, `heavy`, `quiet`, `none` (maitred refuses and says to run it directly), or `checker`.
-- **Checkers.** A checker gets the command's arguments and prints a class and a reservation (`light 2 1200`: 2 cores, 1200 MB). It runs inside the sandbox like everything else. A project might, for example, read the measured cost of the dataset a job will process.
-- **Unlisted commands are quiet,** the most restrictive class: a wrong guess in that direction costs only waiting.
-- **A row without a `why` makes the file invalid.** maitred then treats every command as quiet and says why, rather than guess.
-- **`caffeinate` anywhere in the argv is refused,** whatever the row says.
+- **Matching.** Before matching, a command loses leading assignments and wrappers (`env`, `exec`, `nice`, `time`, `timeout N`, `xargs`, `bundle exec`), and a path to one of the project's own files (`./bin/x`, or its absolute path) is matched as `bin/x`. A shell string (`sh -c '…'`) is split into its simple commands; each is matched, and the strictest class wins. The first matching row wins for each command. `maitred -- a && b` queues only `a`: the caller's shell runs `b` itself.
+- **Classes.** `light`, `heavy`, `quiet`, or `none` (maitred refuses and says to run it directly).
+- **Options.** `cpu` and `mem` give a fixed reservation. `checker` names a command that gets the job's arguments and prints a class and a reservation in the same form (`light cpu=2 mem=1200M`), from what the project knows about the job; it runs inside the sandbox like everything else, and if it fails the row's own class and reservation apply. `leftovers` says what happens to processes the job leaves behind when its main process exits: `stop` (the default), or `keep`, for a job such as an end-to-end test that starts a server it means to leave up. Kept processes stop being the ticket's, a small drain logs them until they close their output, and the sampler still counts them as load nobody admitted. The command line can move an option only in its stricter direction, as with `--class`.
+- **Unlisted commands are** heavy: cautious about the machine, without the idle-machine wait that quiet would impose on every unknown command.
+- **A row without a `why`, or with an option maitred doesn't know, makes the file invalid.** maitred then treats every command as heavy, warns on every run, and marks the records, rather than guess or refuse.
+- **`caffeinate`,** or any wrapper that holds the machine awake, is refused in any simple command of the job, whatever the row says.
 
-**Rules can carry options, validated like everything else in the file.** Besides the checker and the reservation, a rule says what happens to processes its job leaves behind when the job's main process exits: stopped (the default), or kept running, for a job such as an end-to-end test that starts a server it means to leave up. Kept processes stop being the ticket's, but the sampler still counts them as load maitred didn't admit. The command line can move an option only in its stricter direction, as with `--class`.
-
-**Review protects the shared branch; locally, nothing is hidden.** maitred reads the class file as committed on the repository's default branch (configurable), never the working tree. Review is what protects the branch everyone shares. On one machine, a local commit or a moved ref could bypass review, so maitred makes that visible rather than claiming to prevent it: it warns whenever the local default branch is ahead of its upstream. To test a change locally, `--classes <path>` or `$MAITRED_CLASSES` points at an unreviewed file: every run under it prints a warning, its record is marked `unreviewed-classes`, and `maitred status` shows it, so the override is easy to use and impossible to miss. A project outside git gets the same treatment. The CLI offers `classes check` (validate a file) and `classes propose` (draft a change for a pull request), never an apply step. A checker is code agents can edit, so its output never goes below the machine config's minimums, and the live limits, not the checker, keep the machine safe.
+**The class file maitred reads is the one committed on the local branch.** maitred reads `.maitred/classes` as committed on the repository's default branch (configurable) in the local repository, never from the working tree. That is not a claim that anyone reviewed it: a local commit can change it, and maitred doesn't try to tell a reviewed commit from an unreviewed one. What it buys is that a change to the rules is a commit, visible in history and named in the record of every run made under it, and that a stray edit in a working tree changes nothing. Review happens where the project reviews its other config, in pull requests. To try a change without committing it, `--classes <path>` or `$MAITRED_CLASSES` points at a file in the working tree: every run under it prints a warning, its record is marked `uncommitted-classes`, and `maitred status` shows it. A project outside git gets the same treatment. The CLI offers `classes check` (validate a file) and `classes propose` (draft a change), never an apply step. A checker is code agents can edit, so its output never goes below the machine config's minimums, and the live limits, not the checker, keep the machine safe.
 
 ## Platforms
 
@@ -213,11 +212,13 @@ maitred runs in a standard terminal on macOS and Linux, and inside containers, f
 
 |  | Load and memory | Sleep detection | Keeping the sampler running |
 | --- | --- | --- | --- |
-| macOS | host statistics and memory pressure through system calls | `CLOCK_MONOTONIC` minus `CLOCK_UPTIME_RAW` | optional launchd agent |
-| Linux | `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/*` | `CLOCK_BOOTTIME` minus `CLOCK_MONOTONIC` | optional systemd user service |
-| Container | the container's cgroup limits and usage (`memory.max`, `memory.current`, `cpu.max`), not the host's load average, which a container sees but cannot act on | as Linux | the container's entrypoint, or a sidecar |
+| macOS | host statistics and memory pressure through system calls | `CLOCK_MONOTONIC` minus `CLOCK_UPTIME_RAW` | optional launchd daemon, as the maitred user |
+| Linux | `/proc/loadavg`, `/proc/meminfo`, `/proc/pressure/*` | `CLOCK_BOOTTIME` minus `CLOCK_MONOTONIC` | optional systemd service, as the maitred user |
+| Container | the container's cgroup limits and usage (`memory.max`, `memory.current`, `cpu.max`), not the host's load average, which a container sees but cannot act on | as Linux | the container's entrypoint, inside the container it rations |
 
-- **The sampler is an ordinary foreground command.** `maitred watch` runs in any terminal; launchd, systemd or a container entrypoint are optional ways to keep it up.
+- **The sampler is an ordinary foreground command, run as the maitred user.** `maitred watch` runs in any terminal (`sudo -u maitred maitred watch`); `maitred install machine` can register it with launchd or systemd to keep it up, still as that user. It never runs as root.
+- **A supervisor measures only its own job.** Its job's processes run as the same user, so the platform lets it read their CPU and memory without privileges; the sampler, as another user, often can't, which is why the measurement lives in the supervisor.
+- **GPU readings are best effort.** NVIDIA through NVML, AMD through sysfs, Apple Silicon through the accelerator statistics IOKit publishes, each expected to be readable without root (to be verified per platform). On Apple Silicon, GPU memory is the shared pool the memory limits already watch. A machine with no readable GPU has no GPU limit, and `status` says so.
 - **A container is a machine.** It gets its own sampler and queue, sized to its cgroup limits. Container memory limits are caps, not guarantees, and their sum can exceed the host's memory, so host safety needs container limits that fit inside the host. One queue shared by a host and its containers through a shared directory is unsupported until file locks are shown to hold across that boundary (they are not expected to over Docker Desktop's VM file sharing).
 - **Local filesystems only.** File locks over NFS or a VM's file-sharing bridge are not reliable; maitred checks the machine root's filesystem at startup and refuses a network one.
 
@@ -230,18 +231,19 @@ A worker runs `maitred -- <cmd>` and, when it ends, gets the job's own exit stat
 | `maitred [--label L] [--class C] [--timeout T] -- <cmd>` (or `maitred run`) | Enqueue, wait, run, exit with the job's status. Output passes through; a capped copy is kept if asked. With `--timeout`, give up waiting after T and say so |
 | `maitred submit […] -- <cmd>` | Enqueue and start a detached supervisor, print the ticket id, exit at once |
 | `maitred wait <id>` / `--label L` | Block until that job (or every job with that label) has a record, then exit with its status. On an orphan from the same project, offer adoption, which a person confirms |
-| `maitred status [--project] [--json]` | Who runs and who waits (position, class, waited, reservation), the load file's age, orphans, overuse, unexpected sleep assertions; machine-wide or one project's |
+| `maitred status [--project] [--json]` | Who runs and who waits (position, class, waited, reservation, use), the load file's age, orphans, overuse, stopped supervisors, unexpected sleep assertions; machine-wide or one project's |
 | `maitred result <id>` | Print the record. Authoritative for how a run ended |
 | `maitred cancel <id> --reason R` | Write a cancel request; the ticket's own supervisor stops its job, and the record shows who and why. Own project's tickets only; anyone else's needs a person |
 | `maitred update <id>` | Write an update request: a new label, or a stricter class. Nothing that could move a ticket ahead |
-| `maitred classes check` / `propose` | Validate a class file; draft a change for a pull request |
+| `maitred classes check` / `propose` | Validate a class file; draft a change |
 | `maitred export --machine` / `--project` | The sampler's history, or a project's records, through an exporter (v1: OTLP-JSON) |
-| `maitred watch` | The sampler |
+| `maitred watch` | The sampler, run as the maitred user |
+| `maitred install machine` | Create the machine root and the maitred user and, if asked, register the sampler with launchd or systemd. Run once by an administrator |
 | `maitred install claude-code [--check]` | Install the agent skill and the PreToolUse hook, after showing every change and asking |
 
 - **`--class` can only make a job stricter** (light to heavy to quiet), never lighter than its row. Otherwise it would be a way around the class file.
 - **Exit status.** When the job ran, maitred exits with the job's own status. When maitred itself decided (a refusal, a timeout, a kill at the live limits, a cancel), it says so on stderr with the `maitred:` prefix, and `maitred result` is authoritative: any number maitred chose could also be a job's own exit.
-- **Messages** go to stderr with the `maitred:` prefix: queued at position 3, admitted after 4m10s, stopped at the live limits.
+- **Messages** go to stderr with the `maitred:` prefix, starting with the ticket id, so the record can always be found: queued at position 3, admitted after 4m10s, stopped at the live limits.
 - **`submit` and `wait` exist for long queues and for adoption.** A caller may have a time limit (an agent harness's background call does), and a timeout sends TERM, which would stop a waiting or running job. A supervisor started by `submit` is a detached child of a sandboxed shell, so it stays sandboxed.
 - **`caffeinate`** (or any wrapper that holds the machine awake) is refused in the argv. `maitred status` lists sleep assertions held by processes the machine config hasn't declared expected, such as an agent harness's own.
 
@@ -269,13 +271,14 @@ Candidate features, from prior art:
 | An external admission hook (exit 0 start, 1 hold, 2 kill youngest) | parallel `--limit` | later, only if it runs in the waiting process |
 | Opt-in power assertion for one job's lifetime | `caffeinate -i`, `-w` | later, explicit flag only; no tool does this on request today |
 | Backfill by expected runtime | Slurm | no: needs runtime history first |
-| GPU as the first named resource: reserve gpu=1 (or GPU memory), with the sampler reading GPU use for the live limits. For local model inference and ML training, now common jobs | Slurm GRES, task-spooler -G | roadmap, after v1. Linux/NVIDIA reads it through NVML; on Apple Silicon GPU memory is the shared pool the memory floor already watches, and utilisation needs powermetrics (root), which the sampler shouldn't need |
+| GPU: watched by the live limits and the kill policy, then reserved (gpu=1, or GPU memory) as the first named resource. For local model inference and ML training, now common jobs | Slurm GRES, task-spooler -G | v1 watches GPU use where it is readable without root (see Platforms); reservations come after v1 |
+| More kill signals: database locks, timeouts | none yet | later; the kill policy takes them as further thresholds |
 
 **Telemetry is OpenTelemetry data from the start.** The sampler's samples and every record's measurements are stored as OTel metric data points, one JSON object per line: resource attributes (`host.name`, `os.type`, `host.arch`), metric name, unit, value and timestamp, with names from OTel's host-metrics conventions (`system.cpu.utilization`, `system.memory.usage`, `system.cpu.load_average.1m`) and a `maitred.*` namespace for its own (`maitred.queue.waiting`, `maitred.job.duration`). The machine's history and each project's records are exported separately (`maitred export --machine`, `--project`), each as OTLP-JSON with no translation, so any OTel collector can take them and every machine's data has the same shape by construction. Both have a configurable retention. Prometheus's textfile format was ruled out: it carries no timestamps.
 
 Export goes through a small exporter interface between the stored data points and the output. v1 ships OTLP-JSON only, because that is where the ecosystem is aligning; other formats can be added later, built in or as plugins, without touching the sampler.
 
-**Editing the class file:** settled; changes go through pull-request review (see Class file).
+**Editing the class file:** settled; a change is a commit on the default branch, reviewed wherever the project reviews its config (see Class file).
 
 **Sleep.** Detection is always on (above). Keeping the machine awake is an explicit, per-job flag, if it exists at all.
 
@@ -295,6 +298,8 @@ Export goes through a small exporter interface between the stored data points an
 - [ ] The time limit on an agent harness's background call, and whether ending a session kills detached children (decides how much `submit` and `wait` matter).
 - [ ] Whether file locks hold across a host and container boundary on each platform.
 - [ ] Checking a process group's existence from inside a sandbox (`pgrep -g` or an equivalent), for orphaned groups.
+- [ ] A supervisor reading its own job's CPU and memory from inside a sandbox (`proc_pid_rusage` on macOS, `/proc` on Linux).
+- [ ] GPU use readable without root on each platform, Apple Silicon especially.
 - [ ] The name on Homebrew (`maitred` was free on crates.io on 2026-10-07).
 - [ ] How a worker resumed after a reboot finds its project's orphans: likely `status --project` and adopting them together.
 

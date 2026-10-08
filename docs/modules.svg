@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" role="img" aria-label="Only the core decides, and it never touches the operating system" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <!-- Exported from the modules drawing in the maitred architecture doc. Keep the two in step. -->
+  <style>
+    .bg { fill: #ffffff; }
+    .ink { fill: #1d1d1b; }
+    .quiet { fill: #5f5f5a; }
+    .box { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .accent { fill: #2f6fd6; fill-opacity: 0.12; stroke: #2f6fd6; stroke-width: 2; }
+    .wire { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .head { fill: #a3a39a; }
+    .name { font-weight: 600; }
+    .small { font-size: 11.5px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .ink { fill: #ececea; }
+      .quiet { fill: #a9a9a3; }
+      .box, .wire { stroke: #8a8a82; }
+      .accent { fill: #6aa0ff; stroke: #6aa0ff; }
+      .head { fill: #8a8a82; }
+    }
+  </style>
+  <defs>
+    <marker id="mod-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="head" d="M0 0L10 5L0 10z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="760" height="400"/>
+
+  <text class="ink name" x="24" y="34" font-size="15">Only the core decides, and it never touches the operating system</text>
+
+  <rect class="box" x="24" y="56" width="712" height="48" rx="8"/>
+  <text class="ink name" x="40" y="85">cli</text>
+  <text class="quiet small" x="80" y="85">parses every command; one binary, maitred</text>
+
+  <g>
+    <path class="wire" d="M88 104V136" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M234 104V136" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M380 104V136" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M526 104V136" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M672 104V136" marker-end="url(#mod-arrow)"/>
+  </g>
+
+  <rect class="box" x="24" y="136" width="128" height="88" rx="8"/>
+  <text class="ink name" x="40" y="160">supervisor</text>
+  <text class="quiet small" x="40" y="182">enqueue, wait,</text>
+  <text class="quiet small" x="40" y="198">run, measure</text>
+
+  <rect class="box" x="170" y="136" width="128" height="88" rx="8"/>
+  <text class="ink name" x="186" y="160">sampler</text>
+  <text class="quiet small" x="186" y="182">reads the machine,</text>
+  <text class="quiet small" x="186" y="198">writes the load</text>
+
+  <rect class="box" x="316" y="136" width="128" height="88" rx="8"/>
+  <text class="ink name" x="332" y="160">classes</text>
+  <text class="quiet small" x="332" y="182">git, parse,</text>
+  <text class="quiet small" x="332" y="198">match, checkers</text>
+
+  <rect class="box" x="462" y="136" width="128" height="88" rx="8"/>
+  <text class="ink name" x="478" y="160">export</text>
+  <text class="quiet small" x="478" y="182">history, records</text>
+  <text class="quiet small" x="478" y="198">to OTLP-JSON</text>
+
+  <rect class="box" x="608" y="136" width="128" height="88" rx="8"/>
+  <text class="ink name" x="624" y="160">install</text>
+  <text class="quiet small" x="624" y="182">skill and hook,</text>
+  <text class="quiet small" x="624" y="198">after a yes</text>
+
+  <g>
+    <path class="wire" d="M88 224V244"/>
+    <path class="wire" d="M234 224V244"/>
+    <path class="wire" d="M380 224V244"/>
+    <path class="wire" d="M526 224V244"/>
+    <path class="wire" d="M672 224V244"/>
+    <path class="wire" d="M88 244H672"/>
+    <path class="wire" d="M136 244V268" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M376 244V268" marker-end="url(#mod-arrow)"/>
+    <path class="wire" d="M620 244V268" marker-end="url(#mod-arrow)"/>
+  </g>
+
+  <rect class="accent" x="24" y="268" width="224" height="76" rx="8"/>
+  <text class="ink name" x="40" y="292">maitred-core (pure)</text>
+  <text class="ink small" x="40" y="314">decide(), choose_victim(),</text>
+  <text class="ink small" x="40" y="330">states, class rules, OTel</text>
+
+  <rect class="box" x="264" y="268" width="224" height="76" rx="8"/>
+  <text class="ink name" x="280" y="292">store</text>
+  <text class="quiet small" x="280" y="314">machine root and projects:</text>
+  <text class="quiet small" x="280" y="330">slots, locks, requests, records</text>
+
+  <rect class="box" x="504" y="268" width="232" height="76" rx="8"/>
+  <text class="ink name" x="520" y="292">platform</text>
+  <text class="quiet small" x="520" y="314">macOS, Linux, cgroup backends:</text>
+  <text class="quiet small" x="520" y="330">clocks, signals, measuring</text>
+
+  <text class="quiet small" x="24" y="376">The core takes everything as arguments, so tests and the simulator can drive decide() with any snapshot.</text>
+</svg>

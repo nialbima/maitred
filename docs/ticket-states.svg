@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" role="img" aria-label="Orphaned is computed, not written: a free lock is the only mark" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <!-- Exported from the ticket-states drawing in the maitred architecture doc. Keep the two in step. -->
+  <style>
+    .bg { fill: #ffffff; }
+    .ink { fill: #1d1d1b; }
+    .quiet { fill: #5f5f5a; }
+    .box { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .seen { fill: none; stroke: #a3a39a; stroke-width: 1.25; stroke-dasharray: 4 4; }
+    .accent { fill: #2f6fd6; fill-opacity: 0.12; stroke: #2f6fd6; stroke-width: 2; }
+    .wire { fill: none; stroke: #a3a39a; stroke-width: 1.25; }
+    .head { fill: #a3a39a; }
+    .name { font-weight: 600; }
+    .small { font-size: 11.5px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .ink { fill: #ececea; }
+      .quiet { fill: #a9a9a3; }
+      .box, .seen, .wire { stroke: #8a8a82; }
+      .accent { fill: #6aa0ff; stroke: #6aa0ff; }
+      .head { fill: #8a8a82; }
+    }
+  </style>
+  <defs>
+    <marker id="st-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="head" d="M0 0L10 5L0 10z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="760" height="420"/>
+
+  <text class="ink name" x="24" y="30" font-size="15">Orphaned is computed, not written: a free lock is the only mark</text>
+
+  <rect class="box" x="24" y="96" width="100" height="56" rx="8"/>
+  <text class="ink name" x="36" y="120">created</text>
+  <text class="quiet small" x="36" y="138">locked first</text>
+
+  <rect class="box" x="144" y="96" width="104" height="56" rx="8"/>
+  <text class="ink name" x="156" y="120">waiting</text>
+  <text class="quiet small" x="156" y="138">in seq order</text>
+
+  <rect class="box" x="268" y="96" width="104" height="56" rx="8"/>
+  <text class="ink name" x="280" y="120">admitted</text>
+  <text class="quiet small" x="280" y="138">no job yet</text>
+
+  <rect class="box" x="392" y="96" width="104" height="56" rx="8"/>
+  <text class="ink name" x="404" y="120">running</text>
+  <text class="quiet small" x="404" y="138">session, use</text>
+
+  <rect class="box" x="516" y="96" width="104" height="56" rx="8"/>
+  <text class="ink name" x="528" y="120">stopping</text>
+  <text class="quiet small" x="528" y="138">the victim</text>
+
+  <rect class="accent" x="640" y="96" width="96" height="56" rx="8"/>
+  <text class="ink name" x="652" y="120">ended</text>
+  <text class="ink small" x="652" y="138">record only</text>
+
+  <rect class="seen" x="124" y="250" width="160" height="64" rx="8"/>
+  <text class="ink name" x="136" y="274">orphaned, waiting</text>
+  <text class="quiet small" x="136" y="296">keeps seq; skipped</text>
+
+  <rect class="seen" x="304" y="250" width="300" height="64" rx="8"/>
+  <text class="ink name" x="316" y="274">orphaned, admitted, running, stopping</text>
+  <text class="quiet small" x="316" y="296">charged while its session still runs</text>
+
+  <rect class="box" x="300" y="346" width="120" height="48" rx="8"/>
+  <text class="ink name" x="312" y="375">removed</text>
+
+  <g>
+    <path class="wire" d="M124 124H144" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M248 124H268" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M372 124H392" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M496 124H516" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M620 124H640" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M196 96V60H716V96" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M444 96V80H660V96" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M176 152V250" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M216 250V152" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M320 152V250" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M430 152V250" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M556 152V250" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M604 282H688V152" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M204 314V370H300" marker-end="url(#st-arrow)"/>
+    <path class="wire" d="M480 314V370H420" marker-end="url(#st-arrow)"/>
+  </g>
+
+  <text class="quiet small" x="456" y="52" text-anchor="middle">cancel, timeout or signal while waiting</text>
+  <text class="quiet small" x="552" y="74" text-anchor="middle">exits, cancelled or signalled</text>
+  <text class="quiet small" x="506" y="170" text-anchor="middle">chosen</text>
+  <text class="quiet small" x="170" y="206" text-anchor="end">dies</text>
+  <text class="quiet small" x="224" y="206">adopt</text>
+  <text class="quiet small" x="438" y="206">dies</text>
+  <text class="quiet small" text-anchor="end"><tspan x="680" y="204">adopt once the</tspan><tspan x="680" y="220">session is gone</tspan></text>
+  <text class="quiet small" x="212" y="362">expired</text>
+  <text class="quiet small" x="488" y="362">session gone, expired</text>
+</svg>

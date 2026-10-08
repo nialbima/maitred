@@ -40,13 +40,13 @@
   <g>
     <rect class="accent" x="176" y="60" width="560" height="72" rx="8"/>
     <text class="ink name" x="192" y="84">maitred watch, the sampler</text>
-    <text class="ink small" x="192" y="104">reads load, memory and processes every few seconds</text>
+    <text class="ink small" x="192" y="104">reads load, memory and GPU every few seconds, as its own user</text>
     <text class="ink small" x="192" y="120">writes only the load files; never runs or stops a job</text>
   </g>
 
   <g>
     <rect class="box" x="176" y="168" width="560" height="96" rx="8"/>
-    <text class="ink name" x="192" y="192">Machine state ($MAITRED_ROOT): one writer per file</text>
+    <text class="ink name" x="192" y="192">Machine state: one writer per file</text>
     <rect class="chip" x="192" y="216" width="96" height="32" rx="8"/>
     <rect class="chip" x="300" y="216" width="96" height="32" rx="8"/>
     <rect class="chip" x="408" y="216" width="96" height="32" rx="8"/>
@@ -64,10 +64,10 @@
     <text class="ink name" x="192" y="320">Worker A</text>
     <rect class="box" x="192" y="336" width="240" height="56" rx="8"/>
     <text class="ink name" x="208" y="360">maitred -- make release</text>
-    <text class="quiet small" x="208" y="378">admitted, heavy; supervises the job</text>
+    <text class="quiet small" x="208" y="378">running, heavy; measures the job</text>
     <rect class="box" x="192" y="416" width="240" height="56" rx="8"/>
     <text class="ink name" x="208" y="440">make release</text>
-    <text class="quiet small" x="208" y="458">its own process group</text>
+    <text class="quiet small" x="208" y="458">its own session</text>
   </g>
 
   <g>
@@ -89,5 +89,5 @@
     <path class="wire" d="M600 392V416" stroke-dasharray="4 4" marker-end="url(#arch-arrow)"/>
   </g>
 
-  <text class="quiet small" x="176" y="516">When a job ends, its supervisor writes the record into the project's .maitred/ and exits.</text>
+  <text class="quiet small" x="176" y="516">When a job ends, its supervisor writes the record into the project and exits.</text>
 </svg>
