@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 87, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 89, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -629,6 +629,7 @@ Already machine config: `sample_interval`, `poll_interval`, `grace`, `settle`, `
 | `stale_wait` | 3 sample intervals | how long a victim's holder waits for a fresh sample before letting go of its marker |
 | `stall_limit` | 5 poll intervals | when a waiting ticket counts as stalled |
 | `use_freshness` | 3 sample intervals | how old a job's use figure may be and still count |
+| `load_freshness` | 3 sample intervals | how old `load/now.json` may be before `decide` treats the load as stale and falls back to one job at a time |
 
 Sleep is driven by the trace (`woke_at`, and a sample marked not fresh), not by a clock.
 
@@ -712,7 +713,7 @@ Four adversarial reviews (2026-10-07 and 2026-10-15) found about 30, 25, 47 and 
 10. **A first-in job bigger than free memory** is admitted and then killed at the memory threshold; the skill tells agents not to retry such a kill blindly.
 11. **Two maitred versions on one machine** run different `decide` and `choose_victim` over the same files; the machine config's minimum version is the guard.
 12. **Heavy programs the project can't edit** (a system `cargo`, a vendored tool) have no guard line, so only the hook's refusal stops them, and only when the spotter sees them; `classes guard` lists them.
-13. **`docker compose exec` and signals.** A confirmed gap (spike `2026-10-15-compose-exec-signals` in maitred-research): TERM, INT and KILL sent to the host's `docker compose exec -T` client never reach maitred inside the container, which keeps running, and the client exits 130 for TERM and INT, so the caller thinks the job stopped. Phase 7 has to close it before the work machine relies on a container queue. The most promising fix needs nothing on the host: the supervisor treats its broken output as a hangup once the client is gone.
+13. **`docker compose exec` and signals.** A confirmed gap (spike `2026-10-15-compose-exec-signals` in maitred-research): TERM, INT and KILL sent to the host's `docker compose exec -T` client never reach maitred inside the container, which keeps running, and the client exits 130 for TERM and INT, so the caller thinks the job stopped. Phase 7 has to close it before the work machine relies on a container queue. The supervisor can't detect it either: Docker's daemon drains and discards the job's output, so its writes keep succeeding after the client is killed (spike `2026-10-15-compose-exec-broken-pipe`). What's left, both untried: a host-side shim that reads the ticket id from the first stderr line and runs `maitred cancel <id>` in the container on TERM, INT or HUP (a KILL to the shim still leaves the job running, so `status` has to show a container job whose host caller is gone); or `-t` through a pseudo-terminal the shim makes.
 14. **A running job's pid is in its ticket,** so another user can read its command line from `/proc/<pid>/cmdline` on Linux, as they could with `ps`. The ticket adds no new exposure, but doesn't reduce it either.
 15. **No terminal in v1.** A job that needs a password prompt or a full-screen terminal can't run under maitred until terminal mode exists.
 16. **Power loss mid-write** on macOS can leave a ticket with no valid slot; it reads as unknown and unlocked, which the sweep removes.
