@@ -139,7 +139,6 @@ fn snapshot() -> impl Strategy<Value = Snapshot> {
                     aging_ms: 300_000,
                     aging_hold_ms: 300_000,
                     quiet_max_wait_ms: 600_000,
-                    quiet_hold_ms: 200_000,
                     stall_polls: 5,
                     load_freshness_samples: 3,
                     mem_floor_mb: 1_000,

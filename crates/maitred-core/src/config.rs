@@ -14,10 +14,8 @@ pub struct Config {
     pub aging_ms: u64,
     /// How long an aged ticket holds its place before the hold lapses.
     pub aging_hold_ms: u64,
-    /// How long a quiet ticket waits before the queue drains for it.
+    /// How long a quiet ticket waits before the queue drains for it, until it gets in.
     pub quiet_max_wait_ms: u64,
-    /// How long the queue drains for a due quiet ticket.
-    pub quiet_hold_ms: u64,
     /// How many poll intervals without a pass make a waiting ticket stalled.
     pub stall_polls: u64,
     /// How many sample intervals old the load file may be and still count as fresh.

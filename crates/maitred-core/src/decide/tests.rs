@@ -19,7 +19,6 @@ fn config() -> Config {
         aging_ms: 600_000,
         aging_hold_ms: 600_000,
         quiet_max_wait_ms: 3_600_000,
-        quiet_hold_ms: 600_000,
         stall_polls: 5,
         load_freshness_samples: 3,
         mem_floor_mb: 1_000,
@@ -175,7 +174,8 @@ fn with_no_load_file_an_unreadable_ticket_counts_as_charged() {
 }
 
 #[test]
-fn with_no_load_file_a_charged_orphan_keeps_everyone_out() {
+fn with_no_load_file_a_charged_orphan_does_not_keep_everyone_out() {
+    // As for first in: an orphan that never ends must not hold the queue for ever.
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
     orphan.liveness = Liveness::Orphaned {
         holder_alive: true,
@@ -184,7 +184,13 @@ fn with_no_load_file_a_charged_orphan_keeps_everyone_out() {
     let mut snap = snapshot(vec![orphan, ticket("me", 2, Class::Light, State::Waiting)]);
     snap.load = None;
 
-    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
 }
 
 #[test]
@@ -527,6 +533,29 @@ fn first_in_admits_a_job_bigger_than_the_free_budget_when_nothing_is_charged() {
 }
 
 #[test]
+fn first_in_never_waives_memory() {
+    // Outside load leaves 4 GB; a job that reserves 12 GB waits, even on an empty queue, because
+    // over-committing memory is what takes a machine down.
+    let mut mine = ticket("me", 1, Class::Heavy, State::Waiting);
+    mine.reservation = Resources::new(1_000, 12_000);
+    let mut snap = snapshot(vec![mine]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(4_000);
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
+}
+
+#[test]
+fn a_drained_ticket_whose_memory_does_not_fit_still_waits() {
+    let mut lapsed = ticket("me", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 12_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut snap = snapshot(vec![lapsed]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(4_000);
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
+}
+
+#[test]
 fn first_in_admits_only_the_first_allowed_ticket() {
     let mut first = ticket("first", 1, Class::Heavy, State::Waiting);
     first.reservation = Resources::new(64_000, 64_000);
@@ -556,7 +585,7 @@ fn a_charged_orphan_does_not_block_first_in() {
         this_boot: true,
     };
     let mut mine = ticket("me", 2, Class::Heavy, State::Waiting);
-    mine.reservation = Resources::new(64_000, 64_000);
+    mine.reservation = Resources::new(64_000, 1_000);
     let snap = snapshot(vec![orphan, mine]);
 
     assert_eq!(
@@ -721,21 +750,24 @@ fn a_due_quiet_ticket_stops_the_walk_so_the_machine_drains() {
 
     assert_eq!(
         decide(&snap, &me()),
-        Decision::Wait(Reason::DrainingForQuiet(TicketId("quiet".into())))
+        Decision::Wait(Reason::DrainingFor(TicketId("quiet".into())))
     );
 }
 
 #[test]
-fn a_quiet_ticket_past_its_hold_stops_draining_the_machine() {
+fn a_due_quiet_ticket_keeps_draining_the_machine_until_it_gets_in() {
     let mut quiet = ticket("quiet", 1, Class::Quiet, State::Waiting);
-    quiet.waited_ms = 3_600_000 + 600_001;
+    quiet.waited_ms = 365 * 24 * 3_600_000;
     let snap = snapshot(vec![
         ticket("running", 0, Class::Light, State::Running),
         quiet,
         ticket("me", 2, Class::Light, State::Waiting),
     ]);
 
-    assert_eq!(decide(&snap, &me()), admitted());
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("quiet".into())))
+    );
 }
 
 #[test]
@@ -786,18 +818,53 @@ fn a_ticket_not_yet_aged_holds_nothing() {
 }
 
 #[test]
-fn an_aged_hold_lapses_after_aging_hold() {
+fn a_ticket_whose_hold_lapsed_drains_the_machine() {
+    // Past aging_hold it stops holding budget and the walk stops at it, so nothing new starts until
+    // nothing living is charged and it gets in first.
     let mut running = ticket("running", 0, Class::Light, State::Running);
     running.reservation = Resources::new(4_000, 1_000);
-    let mut aged = ticket("aged", 1, Class::Light, State::Waiting);
-    aged.reservation = Resources::new(6_000, 1_000);
-    aged.waited_ms = 600_000 + 600_001;
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(6_000, 1_000);
+    lapsed.waited_ms = 600_000 + 600_001;
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(3_000, 1_000);
 
     assert_eq!(
-        decide(&snapshot(vec![running, aged, mine]), &me()),
-        admitted()
+        decide(&snapshot(vec![running, lapsed, mine]), &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn a_ticket_exactly_at_the_end_of_its_hold_still_holds_and_does_not_drain() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(4_000, 1_000);
+    let mut held = ticket("held", 1, Class::Light, State::Waiting);
+    held.reservation = Resources::new(6_000, 1_000);
+    held.waited_ms = 600_000 + 600_000;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+
+    assert_eq!(
+        decide(&snapshot(vec![running, held, mine]), &me()),
+        Decision::Wait(Reason::Budget)
+    );
+}
+
+#[test]
+fn a_ticket_whose_hold_lapsed_gets_in_first_once_the_machine_has_drained() {
+    let mut lapsed = ticket("me", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(8_000, 1_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut snap = snapshot(vec![lapsed]);
+    snap.load.as_mut().unwrap().cpu_used_millicores = Some(3_000);
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            first_in: true,
+            ..Admission::default()
+        })
     );
 }
 

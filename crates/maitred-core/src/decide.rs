@@ -56,8 +56,8 @@ pub enum Reason {
     Budget,
     /// Every slot of this pool is named by a ticket or taken on paper.
     NoSlot(Pool),
-    /// The walk stopped at a due quiet ticket, so the machine drains for it.
-    DrainingForQuiet(TicketId),
+    /// The walk stopped at a due quiet ticket or one whose hold lapsed, so the machine drains for it.
+    DrainingFor(TicketId),
     /// The walk stopped at a ticket admitted first in.
     BehindFirstIn(TicketId),
 }
@@ -93,7 +93,8 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
     let charged: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_charged(t)).collect();
 
     let Some(load) = reliable_load(snap) else {
-        let nothing_charged = charged.is_empty() && snap.unreadable == 0;
+        // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
+        let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
         let first = waiting(snap, false).first().map(|t| &t.id);
         return if nothing_charged
             && first == Some(me)
@@ -150,8 +151,10 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
             Err(reason) => reason,
         };
         // First in: nothing living is charged and nothing was admitted earlier in this walk. It
-        // waives cores and memory only, never a class rule or a slot.
+        // waives cores only: never memory, whose over-commit takes a machine down, a class rule or
+        // a slot.
         if walk.first_in_open()
+            && walk.memory_fits(t)
             && allowed.is_ok()
             && slots_free(snap, t, &walk.slots_on_paper).is_ok()
         {
@@ -167,8 +170,9 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
         if is_me {
             return Decision::Wait(held);
         }
-        if walk.due_quiet(t) {
-            return Decision::Wait(Reason::DrainingForQuiet(t.id.clone()));
+        // Draining: nothing new starts, so once nothing living is charged it gets in first.
+        if walk.due_quiet(t) || walk.lapsed(t) {
+            return Decision::Wait(Reason::DrainingFor(t.id.clone()));
         }
         // An aged ticket that only the budget keeps out holds its place in it.
         if walk.aged(t) && allowed.is_ok() {
@@ -362,6 +366,10 @@ impl<'a> Walk<'a> {
         slots_free(self.snap, t, &self.slots_on_paper)
     }
 
+    fn memory_fits(&self, t: &Ticket) -> bool {
+        i128::from(self.reserve(t).mem_mb) <= self.free_mem
+    }
+
     fn admit_on_paper(&mut self, t: &Ticket) {
         self.take(self.reserve(t));
         self.admitted_on_paper += 1;
@@ -383,13 +391,17 @@ impl<'a> Walk<'a> {
         t.class == Class::Quiet && t.waited_ms > self.snap.config.quiet_max_wait_ms
     }
 
-    fn due_quiet(&self, t: &Ticket) -> bool {
+    /// A ticket whose aged hold has lapsed: it drains the machine instead, so it is admitted
+    /// eventually even under steady traffic. A quiet ticket has its own drain (`due_quiet`).
+    fn lapsed(&self, t: &Ticket) -> bool {
         let config = &self.snap.config;
+        t.class != Class::Quiet
+            && t.waited_ms > config.aging_ms.saturating_add(config.aging_hold_ms)
+    }
+
+    /// A quiet ticket past `quiet_max_wait`: the walk stops at it until it gets in.
+    fn due_quiet(&self, t: &Ticket) -> bool {
         self.tainted(t)
-            && t.waited_ms
-                <= config
-                    .quiet_max_wait_ms
-                    .saturating_add(config.quiet_hold_ms)
     }
 
     fn aged(&self, t: &Ticket) -> bool {
