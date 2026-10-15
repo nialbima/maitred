@@ -27,9 +27,11 @@ step "unused dependencies"
 cargo machete
 
 step "durations live in the config"
-# ARCHITECTURE.md, Test kit, Time: no bare duration literal outside a config module.
+# ARCHITECTURE.md, Test kit, Time: no bare duration literal outside a config module. The test kit's
+# own timeouts are test timing, not maitred's config, and live in its one timing.rs.
 if offenders=$(grep -rnE 'Duration::from_(secs|millis|micros|nanos|secs_f32|secs_f64)\(' crates --include='*.rs' \
-  | grep -vE '/(config|config/[^:]*)\.rs:' ); then
+  | grep -vE '/(config|config/[^:]*)\.rs:' \
+  | grep -vE '^crates/maitred-testkit/src/timing\.rs:' ); then
   echo "$offenders"
   echo "bin/check: a duration literal outside the config module; name it in the config instead" >&2
   exit 1
