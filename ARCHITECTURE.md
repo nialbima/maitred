@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 80, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 81, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -27,12 +27,13 @@ It does not decide the numbers in the machine config. Those come from a week of 
 
 ## Process model and modules
 
-maitred is a Cargo workspace of two crates: `maitred-core`, which decides and touches nothing, and `maitred`, the one binary, which does all the reading, writing, locking and spawning around it.
+maitred is a Cargo workspace whose two shipped crates are `maitred-core`, which decides and touches nothing, and `maitred`, the one binary, which does all the reading, writing, locking and spawning around it.
 
 ![maitred's modules: commands on top, the pure core and two OS-facing layers below](docs/modules.svg)
 
-- **maitred-core** holds the types (ticket, snapshot, reservation, record), `decide`, `choose_victim`, the state machine's transitions, class-rule matching and the OTel data-point types. No file, clock, process or environment access: everything it needs arrives as an argument. That is what makes admission and the kill policy testable by property and replayable by the simulator.
+- **maitred-core** holds the types (ticket, snapshot, reservation, record), `decide`, `choose_victim`, the state machine's transitions, class-rule matching, the hook's spotter and the OTel data-point types. No file, clock, process or environment access: everything it needs arrives as an argument. That is what makes admission and the kill policy testable by property and replayable by the simulator.
 - **maitred** holds the commands and the layers that face the operating system: `store` (the machine root and project files, slots, locks), `platform` (one backend each for macOS, Linux and cgroups: clocks, signals, sessions, measuring, sampling) and the command modules on top, including the hidden `__hold` and `__drain` entry points the supervisor re-executes itself as.
+- **Three more crates are never shipped:** `maitred-sim`, the deterministic simulator on top of `maitred-core`; and `maitred-scenario` and `maitred-testkit`, the test kit, which has its own owner (Test kit). All five live under `crates/`, with the root `Cargo.toml` as a virtual workspace holding the shared lints, `rust-version` and dependency versions.
 
 Every process is one of three kinds, and none outlives its purpose:
 
@@ -559,19 +560,139 @@ The pure core is tested exhaustively and by property; everything that touches th
 | `decide` | unit tests per rule; property tests over random snapshots | nothing starts past the live limits or beside a running quiet job; admitted reservations never exceed what is free except by first-in; first-in never waives a slot; class rules are never waived; an unmeasured job holds its whole reservation; no two admissions take one slot; the answer depends only on the snapshot |
 | `choose_victim` | unit tests per trigger; property tests | one victim per snapshot, and the same one from every holder for one sample; never a job whose holder is gone or a zombie; nobody chosen while a live stop marker exists or a ticket or marker was just recreated; a streak counts only samples after the last victim was gone |
 | The spotter | fixtures and property tests | every program in command position is found, in POSIX and zsh syntax, inside loops, conditionals, subshells and `$(…)`; nothing inside quotes or a heredoc's body is, except `sh -c`'s string; `$(repo-root)/bin/x` and `./bin/x` both name `bin/x` |
-| Starvation and the herd | a deterministic simulator: synthetic tickets and load traces, many waiters, simulated time, sleeps, kills and deleted tickets | every class is admitted eventually (aging, backfill, `quiet_max_wait`, the lapse of a hold); a burst never exceeds the minimums; settle spaces heavy starts; order follows `(seq, id)`, not poll timing; a breach stops one job at a time |
+| Starvation and the herd | the test kit's scenarios on the simulator (`maitred-sim`), and generated ones: many waiters, simulated time, sleeps, kills and deleted tickets | every class is admitted eventually (aging, backfill, `quiet_max_wait`, the lapse of a hold); a burst never exceeds the minimums; settle spaces heavy starts; order follows `(seq, id)`, not poll timing; a breach stops one job at a time |
 | Tuning | the simulator replaying observe-only samples, from every machine Nick collects | the machine config's starting numbers |
-| The ticket file | a writer killed at every byte offset of a slot write; readers in a tight loop; on macOS and Linux | a reader always finds a complete generation, never a torn or older one |
-| Locks and liveness | many real `maitred` processes on a temporary root, killed with KILL at random points; lock files, whole tickets, stop markers and request directories deleted underneath; a stopped supervisor; Ctrl-Z while holding `admit.lock` | a dead owner always reads as an orphan, a live one never; no two owners of one lock; a deleted ticket or marker comes back and nobody is admitted or chosen meanwhile; a stopped supervisor neither holds budget nor freezes the queue |
+| The ticket file: reader | every torn state built directly: each prefix length of a new slot over the old one, both slots failing the checksum, a bad checksum with valid JSON, a generation that wraps, a newer major version | a reader finds the newest complete generation, never a torn or older one, and treats a ticket with no valid slot as unknown |
+| The ticket file: writers and readers | real processes: one writer in a tight loop and many readers, on macOS and Linux, with the writer killed at pause points around the write and the sync (a single 4 KiB `pwrite` can't be torn at an offset a test chooses) | no reader ever sees a torn generation or one older than the last it read |
+| Locks and liveness | many real `maitred` processes on a temporary root, killed with KILL at pause points; lock files, whole tickets, stop markers and request directories deleted underneath; a stopped supervisor; Ctrl-Z while holding `admit.lock` | a dead owner always reads as an orphan, a live one never; no two owners of one lock; a deleted ticket or marker comes back and nobody is admitted or chosen meanwhile; a stopped supervisor neither holds budget nor freezes the queue |
 | Slot pools | many waiters on a small pool; holders and supervisors killed at random; orphans whose session lives on; a job that leaves a `setsid` daemon behind | two live jobs never hold one number; a slot is free again as soon as the last process that could use it ends; a slot held outside any ticket shows in `status` |
-| Measurement | real jobs of known size (a process that allocates N MB and spins K cores, with children, short-lived children, children whose parent exits first, shared pages, mapped files and a forked server), on Intel and Apple Silicon | each holder's `use` is within a stated margin of the truth on both platforms; shared pages count once; clean file pages don't count; CPU totals never go backwards |
+| Measurement | real jobs of known size (`burn`: N cores, M MB, children, short-lived children, children whose parent exits first, shared pages, mapped files, a forked server), on Intel and Apple Silicon | each holder's `use` is within a stated margin of what `burn` reports; shared pages count once; clean file pages don't count; CPU totals never go backwards |
 | Supervision | real children: every signal at every stage, a job that ignores TERM, a stopped job that handles TERM, a REPL that handles INT, `yes \| head` inside the job, a kept server, a child that calls `setsid` and one that calls `setpgid`, a nested `maitred` and a nested fan-out, `submit` captured with `$(…)` and its job leaving a daemon, the holder killed, the supervisor killed, a binary upgraded mid-wait | forwarding, the gate, the holder and its reports, the grace KILL, the drain, nesting by session, class and slot, signals reaching the whole session but never the holder, the job inheriting no maitred descriptor but its slots, a clean signal state in the job |
 | Input and output | the caller's terminal driven by a test harness: Ctrl-C in a shell loop around maitred, Ctrl-Z and `fg`, `maitred … &` with keystrokes typed for the shell, redirected stdin and stderr, `2>&1` | output in order; a background job never reads the shell's input; Ctrl-Z gives the prompt back; Ctrl-C stops the loop |
 | Class files and the guard | fixtures; an edited class file and checker; git missing or refusing the repository; a pool this machine doesn't declare; `queue:` set; a guarded program started by `git bisect run`, `find -exec`, `xargs`, `make` and cron | each case is matched, refused or flagged as intended; a guarded program is queued however it was started, and runs once, not twice, inside a job |
 | Platforms | GitHub Actions on Linux (real VMs, so flock, cgroups and signals behave as on a Linux box) and macOS; Linux containers with `--memory`/`--cpus` limits and without, including one run as root and shared by several host sessions enqueuing with `docker compose exec`; a local Linux VM for exploring by hand; sleep detection and GPU readings on real hardware | the sampler backends, the filesystem check, the cgroup edge cases, the shared-container case |
 | Inside an agent sandbox | in CI, a sandbox profile close to the agent harness's; periodically, a real headless Claude Code session running maitred end to end | nothing needs what a sandbox denies; a holder can measure its own job |
 | Agent conformance | scenarios that tempt a shortcut (run the heavy command directly, chain it after a light one, edit the class file, tidy `tickets/`, cancel another project's job, kill the supervisor), each run repeatedly against a headless agent with the skill installed; and Nick building gravedigger with maitred | how often agents cooperate, as a number that has to stay high, and that every shortcut shows up in `status` or a record |
-| Regressions from review | every confirmed finding of the adversarial reviews becomes a scenario in the test kit | none of them comes back |
+| Regressions | every finding of review rounds 2 to 4 has a line in the test kit's findings list; each whose failure can still be observed has a scenario (Test kit) | none of them comes back |
+
+## Test kit
+
+`maitred-testkit` (`crates/maitred-testkit`, never shipped) is how every phase after the store is verified. It has a different owner from the code it verifies, so the tests aren't the code checking itself. It never depends on the `maitred` crate. It reads and writes maitred's files (tickets, use files, stop markers, `now.json`, records) from this document's byte layouts, using its own code.
+
+Three crates serve the test kit:
+
+| Crate | Owner | Depends on | Holds |
+| --- | --- | --- | --- |
+| `maitred-scenario` | the test kit's | nothing of maitred's | the scenario type and its DSL |
+| `maitred-sim` | maitred's builder, phase 1 | `maitred-core`, `maitred-scenario` | the deterministic simulator: takes a scenario, returns its outcomes |
+| `maitred-testkit` | the test kit's | `maitred-scenario`, `maitred-sim` | everything else below |
+
+So the test kit links `maitred-core` through the simulator. It never calls `decide` or `choose_victim` itself, but it isn't free of core.
+
+### Scenarios
+
+A scenario is a Rust value built with a small DSL: the machine config, the workers and when they arrive, each job's workload, the load trace, the faults and when they happen, and the outcomes expected (order of admission, who is killed, the records' outcomes, exit statuses). The scenarios are run by cargo-nextest.
+
+- **Two targets.** The same scenario runs on phase 1's deterministic simulator and on real processes. When it runs on both, the outcomes must agree: the order of admission, the victims and the records' outcomes.
+        - On the simulator, the test is core's `decide` and `choose_victim` against the outcomes the scenario expects, which were written from the docs.
+        - The agreement between the two targets tests the layers that touch the operating system (store, supervisor, holder) against the pure model. It isn't `decide` checked against itself.
+- **Generated scenarios.** proptest generates scenarios for the simulator target; a failing case shrinks to a scenario that can be pasted in as a named one.
+- **Seeds.** Every scenario has a seed, and a failure prints it. A real-process scenario that passes on a retry is a finding: nextest retries are off for the test kit.
+- **Docs first.** A scenario is written from DESIGN and this document: the commands, the exit statuses, the file formats and the rules stated here. If a scenario needs a fact the docs don't state, the docs are fixed first. For each phase, the scenarios are committed before the test kit's owner reads that phase's code, so git history shows the order. The code review comes after.
+- **One scenario type.** `maitred-scenario` defines it, and both the simulator and the real-process runner take it, so the scenarios for the two targets can't drift apart.
+
+### Workloads: `burn`
+
+Every job in every scenario is `burn`, so a scenario states exactly what load it creates. `burn` spins N cores and allocates and touches M MB. It can fork children, including short-lived ones and ones whose parent exits first. It can share pages and map files. It can leave a daemon behind with `setsid` or `setpgid`. It ignores or handles TERM and INT, prints on a schedule, holds a port, and reads its slot's variable (`TEST_ENV_NUMBER`). It reports what it actually did, so measurement scenarios compare a holder's figures against the truth.
+
+### Load: `replay`
+
+`replay` is a test-kit binary. It publishes `load/now.json` from a trace instead of reading the machine, including stale samples, missing readings, sleeps (`woke_at`), pressure spikes and streaks. Admission and the kill policy can then be driven deterministically against real processes. In a test root, `load/` is writable by the test user (the debug root override), so `replay` writes it directly. maitred has no replay mode.
+
+- `replay` is a second, independent writer of the load-file format. Every maitred reader of `now.json` is tested against a writer maitred didn't produce.
+- `replay` doesn't test the sampler's own logic: copying use files into `jobs`, `seq_high`, the streaks and `woke_at`. The real sampler is tested against `burn` (Measurement and Platforms). One agreement scenario links the two: a trace recorded from the real sampler, replayed, gives the same admissions.
+
+### Time
+
+The test kit doesn't speed time up. Every duration maitred waits on is a named value in the machine config or a named constant that debug builds let the config override, and the test machine config sets short ones. A test that reads its config shows exactly how fast it runs. Shrinking every interval by one global factor would let scheduler jitter dominate and change which races are being tested. `bin/check` refuses a bare duration literal outside the config module.
+
+Already machine config: `sample_interval`, `poll_interval`, `grace`, `settle`, `aging`, `aging_hold`, `quiet_max_wait`, `quiet_hold`, `orphan_ttl`, `kill_wait`. Named constants until now written inline in this document, each overridable in debug builds:
+
+| Constant | Default | What it times |
+| --- | --- | --- |
+| `admit_lock_retry` | 50 ms | how often a supervisor retries `admit.lock` |
+| `admit_lock_notice` | 10 s | when a supervisor starts saying how long it has waited for `admit.lock` |
+| `checker_timeout` | 5 s | how long a checker may run |
+| `new_file_age` | 1 min | when the sweep removes an abandoned `.new-*` file |
+| `request_dir_age` | 1 min | when the sweep removes a request directory whose ticket doesn't exist |
+| `stale_wait` | 3 sample intervals | how long a victim's holder waits for a fresh sample before letting go of its marker |
+| `stall_limit` | 5 poll intervals | when a waiting ticket counts as stalled |
+| `use_freshness` | 3 sample intervals | how old a job's use figure may be and still count |
+
+Sleep is driven by the trace (`woke_at`, and a sample marked not fresh), not by a clock.
+
+### Faults
+
+**Pause points.** Debug builds of maitred carry named pause points, compiled out of release builds. When the test kit sets `MAITRED_TEST_PAUSE` to a socket path, a process reaching a point it was told to watch sends "at <point>, pid <n>" to the socket and blocks until it hears "go". The test kit then does the fault for real, and says go:
+
+- KILL or STOP the process: the kernel really frees the lock.
+- Delete a ticket, a request directory, a stop marker or a use file underneath.
+- Hold `admit.lock` from outside.
+- Replace the binary.
+
+A pause point never makes a function return an error it didn't get: a fault that is faked tests a path that may not exist.
+
+**Errors produced for real.** Where the docs promise behaviour on an error, the error is real:
+
+- a full disk, from a small disk image (macOS) or a tmpfs with a size limit (Linux);
+- an unwritable records directory, by `chmod` (exit 73);
+- git missing from `PATH`, or refusing the repository (`classes-unverified`);
+- a network filesystem, where CI can mount one (exit 69).
+
+**Release builds carry none of it.** One test builds maitred in release mode and checks that every debug-only feature is absent: the machine-root override, `--machine-config`, the duration overrides, the pause points and the audit entries.
+
+### The invariant checker
+
+The checker watches a test machine root for a whole run and fails on the first violation. The invariants are sorted by how they can be observed. maitred's own word is used only where nothing else can see the fact, and it is checked even there.
+
+| Invariant | Observed from |
+| --- | --- |
+| No ticket disappears before its record exists | filesystem events on `tickets/`, and the project's records |
+| No two live jobs hold one slot number | the tickets' `slots` and the process table (each `burn` reports its number) |
+| At most one live stop marker | filesystem events and a lock probe on `tickets/*.stop` |
+| No job runs whose session isn't already in its ticket | the process table (session ids) against the tickets' headers |
+| Admitted reservations never exceed what was free, except by first-in | the tickets, the trace `replay` published, and the machine config |
+| Nothing is admitted past the live limits | the same |
+| A ticket's file only changes while its owner holds the lock | Linux: on each inotify modification of a `.tk`, `/proc/locks` must list an exclusive flock on that inode. macOS: debug-build audit entries (below), cross-checked against filesystem events |
+
+**Audit entries (macOS only).** In debug builds, store's one function that writes a ticket appends an entry (ticket, generation, pid, the inode it holds locked) to a log in the test root. The checker requires a matching entry for every modification of a `.tk` file that the filesystem reports. That proves the log is complete, not that each entry is true, which is why Linux uses `/proc/locks` instead. That `/proc/locks` lists each flock with its pid and `major:minor:inode` is unverified; phase 0 checks it on the CI runner.
+
+inotify reports a modification after the write, so the owner can be gone by the time the checker reads `/proc/locks`: killed by a fault, or exited normally. A missing lock is a violation unless the owner's death came after the event. The fault controller knows when it killed which process, and a normal exit shows in the process table. If that proves flaky, the strict check runs only in scenarios with no KILL faults, and the docs say so. A lock passed across processes (`submit`) may show the pid that took it, so the check is "an exclusive lock on this inode", not "held by this pid".
+
+**Platforms.** On Linux the checker takes filesystem events from inotify, which reports each one. The checks are complete there, and the claims rest on Linux CI. If macOS's file events turn out to coalesce, macOS runs are labelled sampled and the Linux checks stay as they are. (Whether they coalesce is checked in phase 0.)
+
+**At the end of a run:** every ticket id ever seen has exactly one record, `wait` on every id ends, and no slot is still held.
+
+**The checker is tested too.** Each invariant has a hand-made machine root, or a scripted sequence of file operations, that breaks it, and the checker must catch each one.
+
+### Regressions
+
+Every finding of review rounds 2 to 4, confirmed or plausible, gets one line in `crates/maitred-testkit/FINDINGS.md`. The review reports aren't in the repo, so each line states the failure itself in one clause, and the finding's id is only a label:
+
+```
+r4-state S1 | a CPU breach kills a second job because the streak didn't restart after the first was gone | scenario kill_cpu_streak_rebuilds_after_victim_gone
+r3-threat T7 | a rewritten hook command runs something other than what was approved | impossible by construction: the hook only refuses
+r2-concurrency B6 | an orphan left stopping turns off the kill policy | folded into r4-state S3
+```
+
+(The lines above are invented examples of the format, not sorted findings.)
+
+- **The test is whether the failure can still be observed, not whether its mechanism was redesigned.** A redesign can bring a failure back by another route: r4-state S1 is r3's A5 fix undoing r3's A1 fix. "Impossible by construction" says why.
+- **Every finding has a line,** and the counts per round add up to the round's total.
+- **Plausible findings get scenarios too.** A scenario is how a plausible finding gets confirmed or ruled out.
+- **A scenario fails on its named assertion.** Where it's cheap, it also passes against the fix and fails against the code as it was before the fix.
+
+Defects found by verification go to the `maitred` triage queue (prefix MT) in open_source. The findings list stays in the repo.
 
 ## Risks and open questions
 
@@ -610,11 +731,11 @@ Before phase 1: round 4 applied (this revision) and Nick's sign-off on this orde
 
 | Phase | What | Done when |
 | --- | --- | --- |
-| 0. Toolchain and spikes | `rust-toolchain.toml` pinned, `rust-version` 1.89+ with a CI job at exactly that version; a workspace of `maitred-core`, `maitred` and `maitred-testkit`; `maitred-core` lint-forbidden from `unsafe`, files, processes, clocks, environment and network (`disallowed-methods`, `disallowed-types`); clippy pedantic with `-D warnings` in CI; `deny.toml` (permissive licences only, crates.io only, no duplicate versions or wildcards, bans on every crate Packages rejected, RustSec advisories); `Cargo.lock` committed and a recorded dependency budget; cargo-nextest, cargo-llvm-cov with a coverage gate on the core, cargo-mutants on the core, cargo-machete; one `bin/check` that CI runs too; CI on macOS (Apple Silicon), Linux, and Linux containers with and without limits. Spikes: self-measurement inside the agent sandbox; a per-interval CPU pressure figure on macOS without root; GPU without root; the harness's background-call limits and whether a session's end kills detached children; `docker compose exec` passing TERM and INT; the work app's `TEST_ENV_NUMBER` conventions; flock across a Docker Desktop bind mount (not needed for v1) | `bin/check` green on an empty workspace in CI; each spike's result written down with its decision |
-| 1. The pure core | types; `decide`, `choose_victim`, the state machine; class-file parsing and argv matching; the hook's spotter; OTLP-JSON types; the deterministic simulator | the `decide`, `choose_victim`, spotter and starvation rows of Testing; no surviving mutants in the core |
-| 2. The store | the ticket file, its header and slots; locks with inode re-checks; requests, use files, stop markers, slot files; project files and exclusive records | The ticket file and Locks and liveness rows |
-| 2b. The test kit | `maitred-testkit`, never shipped: a workload program (`burn`: N cores, M MB, children, short-lived children, escaping daemons, signal handlers, a port, reads `TEST_ENV_NUMBER`); a scripted sampler (`watch --replay <trace>`, debug builds); a fault injector (KILL or STOP any maitred process at a named point, delete files underneath, hold `admit.lock`, replace the binary); an invariant checker watching the machine root for every rule this document states; scenario files with sped-up time; the review findings as named scenarios, written before the code they cover | every review finding has a scenario that fails against a stub |
-| 3. Platform and the sampler | clocks and sleep detection; measuring a session on both platforms; sampling the machine and cgroups; `watch`, `now.json`, the history | Measurement and the sampler half of Platforms |
+| 0. Toolchain and spikes | `rust-toolchain.toml` pinned, `rust-version` 1.89+ with a CI job at exactly that version; a virtual workspace under `crates/` of `maitred-core`, `maitred`, `maitred-sim`, `maitred-scenario` and `maitred-testkit` (the last two empty, for the test kit's owner); `maitred-core` lint-forbidden from `unsafe`, files, processes, clocks, environment and network (`disallowed-methods`, `disallowed-types`); clippy pedantic with `-D warnings` in CI; `deny.toml` (permissive licences only, crates.io only, no duplicate versions or wildcards, bans on every crate Packages rejected, RustSec advisories); `Cargo.lock` committed and a recorded dependency budget; cargo-nextest, cargo-llvm-cov with a coverage gate on the core, cargo-mutants on the core, cargo-machete; `bin/check`, which CI runs too, refusing bare duration literals outside the config module; CI on macOS (Apple Silicon), Linux, and Linux containers with and without limits. Spikes: self-measurement inside the agent sandbox; a per-interval CPU pressure figure on macOS without root; GPU without root; the harness's background-call limits and whether a session's end kills detached children; `docker compose exec` passing TERM and INT; the work app's `TEST_ENV_NUMBER` conventions; `/proc/locks` listing each flock with its inode on the CI runner; whether macOS file events coalesce; flock across a Docker Desktop bind mount (not needed for v1) | `bin/check` green on the empty workspace in CI; each spike's result written down with its decision |
+| 1. The pure core and the simulator | types; `decide`, `choose_victim`, the state machine; class-file parsing and argv matching; the hook's spotter; OTLP-JSON types; `maitred-sim`, taking the test kit's scenarios | the `decide`, `choose_victim`, spotter and starvation rows of Testing; no surviving mutants in the core |
+| 2. The store | the ticket file, its header and slots; locks with inode re-checks; requests, use files, stop markers, slot files; project files and exclusive records; the debug-only pause points and audit entries | The ticket file and Locks and liveness rows |
+| 2b. The test kit | `maitred-scenario` and `maitred-testkit` (Test kit): the scenario DSL, the runner for both targets, `burn`, `replay`, the pause-point controller, real error sources, the invariant checker and its audit cross-check, the findings list, and their scenarios | every finding of rounds 2 to 4 has a line in `FINDINGS.md`, and the counts add up; the checker catches every seeded violation; `burn` and `replay` pass their own tests; every regression scenario runs and fails on its named assertion, not on a panic or a missing binary (most fail only because the phase they cover isn't built yet: this proves the scenario runs, not that it would catch the bug) |
+| 3. Platform and the sampler | clocks and sleep detection; measuring a session on both platforms; sampling the machine and cgroups; `watch`, `now.json`, the history | Measurement and the sampler half of Platforms, and the scenario that a recorded trace replayed gives the same admissions |
 | 4. Observe-only | `install machine`; a supervisor that runs jobs at once through a plain child process and records what `decide` would have said; `status`, `result`, `wait`; the pass-through without a machine root | **the data week starts** on the laptop and, if allowed, the work machine |
 | 5. Supervision | the holder (parked at enqueue, the gate socket, reports, slots, signal reset, subreaper, `leftovers`, the drain); signals; `submit`, `cancel`, `update`, nesting; orphans, adoption, the sweep; pipes for output and input; `wait --events`; `guard` | Supervision, Input and output, Class files and the guard |
 | 6. Admission and slot pools | the admission loop, settle, aging, the fallbacks; slot pools; the machine config from the observe-only week through the simulator | Slot pools; starvation against real processes |
