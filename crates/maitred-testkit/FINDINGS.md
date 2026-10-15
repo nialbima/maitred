@@ -1,6 +1,6 @@
 # Findings from the design reviews
 
-Every finding of maitred's adversarial design reviews, rounds 2 to 4, with what the test kit does about it
+Every finding of maitred's adversarial design reviews, rounds 1 to 4, with what the test kit does about it
 (ARCHITECTURE.md, Test kit: Regressions). One line per finding:
 
 ```
@@ -8,7 +8,8 @@ Every finding of maitred's adversarial design reviews, rounds 2 to 4, with what 
 ```
 
 The review reports themselves aren't in this repository; the id is only a label, and each line states its failure
-in its own words. Dispositions:
+in its own words. Round 1's findings appear under round 2's ids: round 2 rechecked each one by number (its `A` and
+`AF` items), and every numbered round-1 finding is among them. Dispositions:
 
 - `scenario <name> <sim|real|both> phase <n>`: the failure can still be observed under the current design, so a
   scenario checks it. `sim` runs on the simulator, `real` needs real processes, `both` runs on both; the phase is the
@@ -17,40 +18,38 @@ in its own words. Dispositions:
 - `impossible by construction: <why>`: the current design leaves no route to the failure.
 - `not a defect: <why>`: the report refuted it, or the design states the behaviour as intended.
 - `out of v1: <where>`: the feature it concerns isn't in v1.
-- `original text lost`: round 2 rechecked round-1 findings by number, and round 1's report wasn't kept, so only
-  the verdict is known. Whether a later round raised the same failure again isn't checked.
 
-Sorted 2026-10-15 against ARCHITECTURE.md rev 88. A scenario's name may change when it is written; this file is
-updated with it.
+Sorted 2026-10-15 against ARCHITECTURE.md rev 88, with round 1's text checked against rev 96. A scenario's name may
+change when it is written; this file is updated with it.
 
 ## Counts
 
-| Report | Findings | scenario | folded into | impossible by construction | not a defect | out of v1 | original text lost |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| r2-admission | 21 | 11 | 1 | 0 | 2 | 0 | 7 |
-| r2-concurrency | 27 | 11 | 2 | 1 | 4 | 0 | 9 |
-| r2-platforms | 27 | 8 | 9 | 0 | 2 | 2 | 6 |
-| r2-threat | 24 | 12 | 2 | 1 | 4 | 0 | 5 |
-| r3-admission | 21 | 18 | 0 | 1 | 2 | 0 | 0 |
-| r3-processes | 19 | 15 | 2 | 1 | 1 | 0 | 0 |
-| r3-threat | 26 | 16 | 0 | 4 | 6 | 0 | 0 |
-| r4-classify | 24 | 20 | 0 | 1 | 3 | 0 | 0 |
-| r4-processes | 18 | 16 | 0 | 0 | 0 | 2 | 0 |
-| r4-state | 21 | 20 | 0 | 1 | 0 | 0 | 0 |
-| **all** | **228** | **147** | **16** | **10** | **24** | **4** | **27** |
+| Report | Findings | scenario | folded into | impossible by construction | not a defect | out of v1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| r2-admission | 21 | 14 | 4 | 1 | 2 | 0 |
+| r2-concurrency | 27 | 16 | 4 | 3 | 4 | 0 |
+| r2-platforms | 27 | 13 | 10 | 0 | 3 | 1 |
+| r2-threat | 24 | 14 | 4 | 1 | 5 | 0 |
+| r3-admission | 21 | 18 | 0 | 1 | 2 | 0 |
+| r3-processes | 19 | 15 | 2 | 1 | 1 | 0 |
+| r3-threat | 26 | 16 | 0 | 4 | 6 | 0 |
+| r4-classify | 24 | 20 | 0 | 1 | 3 | 0 |
+| r4-processes | 18 | 16 | 0 | 0 | 0 | 2 |
+| r4-state | 21 | 20 | 0 | 1 | 0 | 0 |
+| **all** | **228** | **162** | **24** | **13** | **26** | **3** |
 
 ## r2-admission
 
-r2-admission A1 | free memory is worked out from each process's whole resident size, so a job looks bigger than it is and too many jobs are admitted beside it | folded into r2-admission B2
-r2-admission A2 | a dead ticket nobody can read keeps the one-job-at-a-time fallback from admitting anyone | scenario fallback_admits_past_dead_unreadable_ticket sim phase 1
-r2-admission A3 | round-1 admission item 3, which the report marks fixed in the architecture but not the design without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A4 | round-1 admission item 4, which the report marks fixed at a new cost without saying what either was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A5 | round-1 admission item 5, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A6 | round-1 admission item 6, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A7 | round-1 admission item 7, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A8 | round-1 admission item 8, which the report marks fixed in the architecture but not the design without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-admission A9 | the supervisor of a running job that is stopped or stuck can't be told apart from one that is working | scenario running_supervisor_keeps_marking_its_passes real phase 5
-r2-admission A10 | round-1 admission item 10, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-admission A1 | a job using more memory than it reserved hands the excess back to the budget, so a job is admitted into memory that isn't free | scenario job_over_its_reservation_gives_no_memory_back_to_budget sim phase 1
+r2-admission A2 | a load reading the sampler can't take makes every job wait for ever, while a stale load file would still admit one job at a time | folded into r2-platforms A5
+r2-admission A3 | a job that needs a quiet machine is started on a busy machine because it is first in line with nothing else running, or, waiting at the head of the queue, keeps every other job out for ever | scenario first_in_never_starts_quiet_job_on_busy_machine sim phase 1
+r2-admission A4 | a large job that has waited long but is kept out by the limit on running large jobs makes every small job behind it wait for hours, as if the queue were a single lock | folded into r2-admission B6
+r2-admission A5 | a light job that asks for more than the class minimum never starts while smaller light jobs keep arriving and taking the room | scenario large_light_ticket_ages_and_gets_in_under_steady_small_arrivals sim phase 1
+r2-admission A6 | two large jobs start together past the limit on running large jobs, and which job starts first depends on which waiter happens to check first, not on queue order | scenario walk_counts_paper_admissions_against_class_limits sim phase 1
+r2-admission A7 | a job left running after its supervisor was killed keeps its reservation for up to a day, and no other job can start meanwhile | folded into r2-admission B8
+r2-admission A8 | a job that needs a quiet machine, having waited long, holds back a light job queued ahead of it | impossible by construction: Inside `decide` walks the waiting tickets in queue order, a due quiet ticket only stops the walk at its own place, and the light class is always allowed, so no job queued earlier is held back by it
+r2-admission A9 | a stopped or stuck waiting supervisor at the head of the queue takes budget and blocks every job behind it, and a stopped running supervisor can't be told apart from a working one | scenario stopped_supervisor_waiting_or_running_is_seen_as_stalled real phase 6
+r2-admission A10 | on a breach the job chosen to be killed is one that no process will act on, or a second job is killed on a reading taken before the first was gone | folded into r2-admission B4
 r2-admission A11 | the design and the architecture disagree on what a checker prints and on whether each class has its own limit on running jobs | not a defect: DESIGN's Class file and Admission sections now give the same checker output (`<class> [cpu=] [mem=]`) and per-class `max_running` as ARCHITECTURE's Checkers and Inside `decide`
 r2-admission B1 | jobs whose use can't be measured are treated as using all they reserved, so they hold nothing back and a burst is admitted far past the machine's cores | scenario unmeasured_job_holds_whole_reservation sim phase 1
 r2-admission B2 | memory shared between a job's processes is counted once per process, so the job looks bigger than it is and too many jobs are admitted beside it | scenario shared_pages_counted_once_in_job_use real phase 3
@@ -65,22 +64,22 @@ r2-admission B10 | the design's account of admission (budget, class rules, first
 
 ## r2-concurrency
 
-r2-concurrency A1 | round-1 concurrency item 1, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-concurrency A1 | the load reading goes stale for good because a sampler started by a second user can't replace the first user's load file, so every waiter falls back to one job at a time | impossible by construction: Where things live, and who owns them makes `load/` the maitred user's and written by the sampler only, and Command line says `watch` refuses to run as any other user, so only one user ever writes the load file
 r2-concurrency A2 | a person can't cancel another user's job, and nothing said who may create entries in the shared requests directory | not a defect: ARCHITECTURE's Requests and scope says another user's ticket is cancelled as that user or as root, and Where things live, and who owns them now gives `requests/` its owner and mode (`1777`, created at install)
-r2-concurrency A3 | round-1 concurrency item 3, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-concurrency A4 | starting a job hangs for ever, because the step that waits for the go-ahead blocks the call that starts the helper process | folded into r2-concurrency B1
-r2-concurrency A5 | round-1 concurrency item 5, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-concurrency A6 | round-1 concurrency item 6, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-concurrency A7 | round-1 concurrency item 7, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-concurrency A8 | round-1 concurrency item 8, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-concurrency A3 | after a lock file is deleted and recreated, two processes each hold the same lock, so two waiters admit at once, or an adopter supervises a ticket no one else can see | scenario deleted_lock_file_never_gives_two_owners real phase 2
+r2-concurrency A4 | an orphan whose supervisor died between admission and start can be neither adopted nor removed, and a job started just before such a death runs behind a ticket that names no session, uncharged and out of reach | scenario supervisor_killed_between_admission_and_start_leaves_no_stuck_or_uncharged_job real phase 5
+r2-concurrency A5 | `wait` on a job never returns because neither its ticket nor its record exists, or a finished job's true record is overwritten and the job is run again | scenario wait_always_ends_and_finished_record_never_overwritten real phase 5
+r2-concurrency A6 | after a reboot a ticket takes the previous boot's id, so its running job looks left over from before the reboot, isn't charged, and may be swept while it runs | impossible by construction: The ticket's payload (`boot`) has each supervisor read the boot id itself from the kernel (Linux `boot_id`, the start time of process 1 on macOS), never from the sampler's file, which survives a reboot
+r2-concurrency A7 | a dead job's ticket looks alive while another reader is checking it, so its reservation keeps other jobs out or it blocks the queue | scenario liveness_reader_never_makes_dead_ticket_look_alive real phase 2
+r2-concurrency A8 | a job left running after its supervisor died loses its reservation while it sits idle, and new jobs fill its room before it picks up again | folded into r2-platforms B9
 r2-concurrency A9 | while `submit` hands its ticket to the detached supervisor, the ticket can look abandoned or be lost | scenario submit_handover_never_leaves_ticket_orphaned real phase 5
 r2-concurrency A10 | a supervisor stopped with Ctrl-Z while holding the queue's lock freezes admission for every user until it is resumed | scenario ctrl_z_while_holding_queue_lock_is_deferred real phase 6
-r2-concurrency A11 | a ticket whose details are longer than the room in its fixed-size slot can't be written whole | scenario ticket_payload_at_slot_size_limit real phase 2
-r2-concurrency A12 | round-1 concurrency item 12, which the report marks partly fixed or made worse without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-concurrency A11 | a torn read makes a ticket go back a generation or read as unknown, and a ticket whose details exceed the room in its fixed-size slot can't be written whole | scenario ticket_never_read_older_or_partial_at_any_payload_size real phase 2
+r2-concurrency A12 | a ticket written by a newer maitred is charged less than its reservation or given no defined place in the queue, and two tickets can get the same queue number | folded into r3-admission A18
 r2-concurrency A13 | a job's record written in one worktree can't be found from another worktree of the same project | scenario wait_finds_record_in_another_worktree real phase 5
 r2-concurrency AF4 | a job's child that left the job's session runs maitred, waits in the queue behind its own parent, and the two wait on each other | scenario setsid_child_queues_and_parent_wait_ends_by_timeout real phase 5
-r2-concurrency AF8 | round-1 item F8, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-concurrency AF10 | round-1 item F10, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-concurrency AF8 | a system cleaner deletes long-untouched lock files, so two processes each hold the admission lock at once | folded into r2-concurrency A3
+r2-concurrency AF10 | a dead orphan stays charged, or a forced kill hits an unrelated process group, because a process or group number was reused | scenario reused_process_number_never_charged_or_signalled real phase 5
 r2-concurrency AF7 | any user can hold the queue's lock and stop admission for everyone | not a defect: ARCHITECTURE's Risks and open questions (item 8) accepts it as inherent to flock
 r2-concurrency B1 | starting a job hangs for ever, because the step that waits for the go-ahead blocks the call that starts the helper process | scenario job_start_does_not_wait_on_go_ahead real phase 5
 r2-concurrency B2 | two first runs in one project disagree on the project's identity or corrupt a per-user index, and the index sits outside what the agent sandbox may write | impossible by construction: Where things live, and who owns them says there is no per-user state outside the machine root and the projects, and The ticket's payload (`project`) makes the project id a hash computed from the repository's path, never stored
@@ -96,17 +95,17 @@ r2-concurrency B10 | the design and the architecture disagree on who runs the sa
 ## r2-platforms
 
 r2-platforms A1 | a sandboxed agent's run fails because maitred writes a per-user file outside what the sandbox may write | folded into r2-threat B7
-r2-platforms A2 | the process that keeps logging kept leftovers' output doesn't work when the job has a terminal | out of v1: ARCHITECTURE's The job's output and input (jobs get pipes, never a terminal; terminal mode comes after v1), and Build order ("Not in v1: terminal mode")
+r2-platforms A2 | a process left running after the job, kept by its rule or escaped with `setsid`, still holds the job's output open, so either the supervisor never exits and keeps its reservation, or the kept process dies of a broken pipe on its next write | scenario process_holding_job_output_neither_hangs_supervisor_nor_dies real phase 5
 r2-platforms A3 | Ctrl-Z doesn't stop the job | folded into r2-platforms B2
 r2-platforms A4 | a job's child that left the job's session runs maitred and waits for ever behind its own parent | folded into r2-concurrency AF4
-r2-platforms A5 | round-1 item F5, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-platforms A6 | round-1 item F6, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-platforms A5 | a sampler that runs but can't read memory or CPU keeps the load file fresh, so every job waits for ever instead of being admitted one at a time | scenario missing_critical_reading_falls_back_to_one_at_a_time sim phase 1
+r2-platforms A6 | a ticket made inside an agent sandbox carries no boot id, because the sandbox refuses the read, so its orphan stays charged for a day | scenario supervisor_reads_boot_id_inside_agent_sandbox real phase 9
 r2-platforms A7 | on macOS the sampler, running as its own user, can't read any job's CPU or memory | folded into r2-admission B1
-r2-platforms A8 | round-1 item F8, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-platforms A9 | round-1 item F9, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-platforms A8 | a system cleaner deletes the long-untouched lock files under `/var/tmp`, so two processes each hold the admission or sampler lock | folded into r2-concurrency A3
+r2-platforms A9 | inside a container the capacity or free memory is read wrong (no limit set, cgroup v1, a CPU set, page cache counted as used, a quota under one core), so too many jobs start or none ever does | scenario cgroup_capacity_and_working_set_read_at_their_edges real phase 3
 r2-platforms A10 | an orphaned job that is still running is treated as gone because its leader's start time can't be checked | folded into r2-platforms B9
-r2-platforms A11 | round-1 item F11, which the report says is acknowledged but not fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-platforms A12 | round-1 item F12, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-platforms A11 | a harness that kills the caller's process group to end a timed-out call kills maitred but not the job, which runs on in its own session | not a defect: Signals ("supervisor killed with KILL") and The job's output and input state that a job whose supervisor is killed runs on under its holder as a running orphan, which `status` shows
+r2-platforms A12 | closing the terminal kills a job the user started under `nohup` | scenario nohup_job_survives_terminal_hangup real phase 5
 r2-platforms A13 | a supervisor stopped while holding the queue's lock freezes admission until it is resumed | folded into r2-concurrency A10
 r2-platforms A14 | a job can't be given a terminal inside the agent sandbox, which doesn't allow opening one | out of v1: ARCHITECTURE's The job's output and input (jobs get pipes, never a terminal), and Build order ("Not in v1: terminal mode")
 r2-platforms B1 | starting a job hangs for ever, because the step that waits for the go-ahead blocks the call that starts the helper process | folded into r2-concurrency B1
@@ -129,14 +128,14 @@ r2-threat A1 | an agent writes its own ticket with a smaller reservation, and th
 r2-threat A2 | the kill policy acts on memory only, its CPU claim is false, and an honest heavy job is killed first | folded into r2-admission B7
 r2-threat A3 | in `maitred -- A && B` only A is queued, and a heavy B runs without the queue | scenario hook_refuses_heavy_program_chained_after_maitred sim phase 1
 r2-threat A4 | moving a branch to a commit with a different class file goes unnoticed | folded into r2-threat B9
-r2-threat A5 | round-1 threat item F5, which the report marks partly fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-threat A6 | round-1 threat item F6, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-threat A5 | an agent runs a heavy job from a throwaway repository whose class file calls it light, so it runs as light with no flag and its records land in the throwaway project | not a defect: Class files, Reading the class file step 1 states that a worker chooses its project by its working directory and that records and `status` show each project's path, and DESIGN's Principle and threat model says maitred coordinates and doesn't contain
+r2-threat A6 | inside a light job, a nested maitred run of a heavy command runs straight through with no class, reservation or record of its own | scenario nested_run_of_stricter_class_is_refused real phase 5
 r2-threat A7 | any user can hold the queue's lock and stop admission for everyone | not a defect: ARCHITECTURE's Risks and open questions (item 8) accepts it as inherent to flock
 r2-threat A8 | a non-interactive `wait` on an orphaned job hangs for up to a day | scenario noninteractive_wait_on_orphan_exits_or_waits_for_its_job real phase 5
-r2-threat A9 | round-1 threat item F9, which the report says is fixed in maitred but broken in the hook, without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
-r2-threat A10 | round-1 threat item F10, which the report marks fixed (opening B2 and B3) without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-threat A9 | one broken line in the class file makes maitred refuse every heavy job, or leaves the hook with no rules so it refuses nothing | scenario invalid_class_file_runs_heavy_and_hook_still_refuses sim phase 1
+r2-threat A10 | the hook either queues every unlisted command, `ls` included, or protects nothing | folded into r2-threat B2
 r2-threat A11 | another user can read a running job's command line through the process id in its ticket | not a defect: ARCHITECTURE's Risks and open questions (item 14) accepts it as no more than `ps` already shows
-r2-threat A12 | round-1 threat item F12, which the report marks fixed without saying what it was | original text lost: round 1's report was never saved, and round 2 records only this verdict
+r2-threat A12 | a release build accepts a machine-config flag, so a supervisor admits itself under limits it chose | folded into r2-threat B6
 r2-threat A13 | with `--quiet` the caller gets no ticket id to find the record by, and a refusal before the ticket exists is confused with a job's failure | scenario quiet_run_still_prints_ticket_id real phase 5
 r2-threat A14 | a command that only mentions a keep-awake program as an argument, such as `rg caffeinate`, is refused | scenario keep_awake_word_as_argument_not_refused sim phase 1
 r2-threat B1 | cloning a local repository makes an edited class file count as the reviewed one, so its looser classes go unflagged | not a defect: ARCHITECTURE's Class files (Reading the class file, step 2) compares against the committed and default-branch copies only to show edits, "for seeing, not stopping", and DESIGN's Feature discovery settles the class file as plain config with edits recorded
