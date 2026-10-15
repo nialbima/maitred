@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 86, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 87, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -654,7 +654,7 @@ A pause point never makes a function return an error it didn't get: a fault that
 
 ### The invariant checker
 
-The checker watches a test machine root for a whole run and fails on the first violation. The invariants are sorted by how they can be observed. maitred's own word is used only where nothing else can see the fact, and it is checked even there.
+The checker watches a test machine root for a whole run and fails on the first violation it sees. Its checks are **sampled on both platforms**. Filesystem events (inotify on Linux, FSEvents on macOS) tell it when to look, but they can't be counted: inotify merges identical back-to-back events, so 1000 writes to one ticket gave 1 to 459 `IN_MODIFY` events (spike `2026-10-15-linux-lock-observation` in maitred-research). So the checker looks on every event, and again at the end of the run, and doesn't claim to see every write.
 
 | Invariant | Observed from |
 | --- | --- |
@@ -664,13 +664,14 @@ The checker watches a test machine root for a whole run and fails on the first v
 | No job runs whose session isn't already in its ticket | the process table (session ids) against the tickets' headers |
 | Admitted reservations never exceed what was free, except by first-in | the tickets, the trace `replay` published, and the machine config |
 | Nothing is admitted past the live limits | the same |
-| A ticket's file only changes while its owner holds the lock | Linux: on each inotify modification of a `.tk`, `/proc/locks` must list an exclusive flock on that inode. macOS: debug-build audit entries (below), cross-checked against filesystem events |
+| A ticket's file only changes while its owner holds the lock | held by construction in the store (below); checked by a lock probe on each modification event, and by debug-build audit entries |
+| A ticket's generation only goes up | a read of the ticket on each modification event |
 
-**Audit entries (macOS only).** In debug builds, store's one function that writes a ticket appends an entry (ticket, generation, pid, the inode it holds locked) to a log in the test root. The checker requires a matching entry for every modification of a `.tk` file that the filesystem reports. That proves the log is complete, not that each entry is true, which is why Linux uses `/proc/locks` instead. That `/proc/locks` lists each flock with its pid and `major:minor:inode` is unverified; phase 0 checks it on the CI runner.
+**The lock on a ticket.** Three layers, because no one of them is complete:
 
-inotify reports a modification after the write, so the owner can be gone by the time the checker reads `/proc/locks`: killed by a fault, or exited normally. A missing lock is a violation unless the owner's death came after the event. The fault controller knows when it killed which process, and a normal exit shows in the process table. If that proves flaky, the strict check runs only in scenarios with no KILL faults, and the docs say so. A lock passed across processes (`submit`) may show the pid that took it, so the check is "an exclusive lock on this inode", not "held by this pid".
-
-**Platforms.** On Linux the checker takes filesystem events from inotify, which reports each one. The checks are complete there, and the claims rest on Linux CI. If macOS's file events turn out to coalesce, macOS runs are labelled sampled and the Linux checks stay as they are. (Whether they coalesce is checked in phase 0.)
+1. **By construction.** The store's one function that writes a ticket takes a value that can only be obtained by locking the ticket (a guard type). Code review checks this.
+2. **A lock probe.** On each modification event, the checker tries `flock(LOCK_SH | LOCK_NB)` on the ticket, as every liveness read already does (Locks that can't be fooled). It is a violation if the try succeeds while the ticket still exists, unless the owner died after the event (the fault controller knows when it killed which process, and a normal exit shows in the process table) or its record already exists. `/proc/locks` isn't used: once the process that took a lock exits, its line disappears even though the lock is still held by the process the descriptor was handed to, which is exactly `submit`'s hand-over (same spike).
+3. **Audit entries.** In debug builds, that write function appends an entry (ticket, generation, pid, the inode it holds locked) to a log in the test root, on both platforms. This is maitred's own account and is labelled as such: the checker compares it with what it saw, but doesn't treat it as proof.
 
 **At the end of a run:** every ticket id ever seen has exactly one record, `wait` on every id ends, and no slot is still held.
 
@@ -711,7 +712,7 @@ Four adversarial reviews (2026-10-07 and 2026-10-15) found about 30, 25, 47 and 
 10. **A first-in job bigger than free memory** is admitted and then killed at the memory threshold; the skill tells agents not to retry such a kill blindly.
 11. **Two maitred versions on one machine** run different `decide` and `choose_victim` over the same files; the machine config's minimum version is the guard.
 12. **Heavy programs the project can't edit** (a system `cargo`, a vendored tool) have no guard line, so only the hook's refusal stops them, and only when the spotter sees them; `classes guard` lists them.
-13. **`docker compose exec` and signals.** Whether a harness's timeout or Ctrl-C on the host reaches maitred inside the container is unverified; if it doesn't, the job runs on after the call is gone.
+13. **`docker compose exec` and signals.** A confirmed gap (spike `2026-10-15-compose-exec-signals` in maitred-research): TERM, INT and KILL sent to the host's `docker compose exec -T` client never reach maitred inside the container, which keeps running, and the client exits 130 for TERM and INT, so the caller thinks the job stopped. Phase 7 has to close it before the work machine relies on a container queue. The most promising fix needs nothing on the host: the supervisor treats its broken output as a hangup once the client is gone.
 14. **A running job's pid is in its ticket,** so another user can read its command line from `/proc/<pid>/cmdline` on Linux, as they could with `ps`. The ticket adds no new exposure, but doesn't reduce it either.
 15. **No terminal in v1.** A job that needs a password prompt or a full-screen terminal can't run under maitred until terminal mode exists.
 16. **Power loss mid-write** on macOS can leave a ticket with no valid slot; it reads as unknown and unlocked, which the sweep removes.
