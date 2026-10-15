@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 531, 2026-10-15):
+  Synced from the maitred design doc on claude.ai (rev 532, 2026-10-15):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -342,7 +342,7 @@ A later `maitred install` step could set one of these up, the Linux cgroup wrapp
 
 - [ ] Whether ending an agent session kills processes its calls left behind (spike, 2026-10-15: they outlive the call; background calls have no limit in interactive sessions and 30 minutes by default in unattended ones). A manual check once `submit` exists.
 - [ ] Whether file locks hold across a host and container boundary on each platform.
-- [ ] A holder reading its own job's CPU and memory from inside a sandbox: works on macOS (spike, 2026-10-15: within a few percent, about 1 ms per scan); Linux still to run.
+- [ ] A holder reading its own job's CPU and memory from inside a sandbox: works on macOS inside the sandbox (spike, 2026-10-15: within a few percent, about 1 ms per scan) and on Linux as an unprivileged user in a limited container, by the subreaper and descendant walk (same spike: within 1%, 2 to 3 ms per pass); not yet tried inside a Linux agent sandbox.
 - [ ] The threshold that separates a busy machine from a starving one. (A machine-wide CPU pressure figure on macOS without root doesn't exist, spike 2026-10-15; the macOS CPU kill uses maitred's own running threads, Nick 2026-10-15.)
 - [ ] GPU use readable without root: Apple Silicon yes through IOKit (spike, 2026-10-15), still to check as the `maitred` user and under a known load; NVIDIA and AMD untested.
 - [ ] Whether `docker compose exec` passes TERM and INT through to maitred inside the container, so a harness's timeout or Ctrl-C reaches the job.
