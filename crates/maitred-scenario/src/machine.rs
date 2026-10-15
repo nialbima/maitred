@@ -62,7 +62,6 @@ pub struct MachineConfig {
     pub aging: Ms,
     pub aging_hold: Ms,
     pub quiet_max_wait: Ms,
-    pub quiet_hold: Ms,
     pub orphan_ttl: Ms,
     pub kill_wait: Ms,
     // Named constants a debug build lets the config override (ARCHITECTURE.md, Test kit: Time).
@@ -140,7 +139,6 @@ impl MachineConfig {
             aging: secs(3),
             aging_hold: secs(3),
             quiet_max_wait: secs(5),
-            quiet_hold: secs(3),
             orphan_ttl: secs(30),
             kill_wait: secs(1),
             admit_lock_retry: ms(10),
