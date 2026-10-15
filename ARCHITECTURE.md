@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 105, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 107, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -90,7 +90,8 @@ Every file has one owner, one stated mode and one writer; a ticket is rewritten 
 | `tickets/<id>.stop` | the ticket's owner | `0644`, created exclusively, locked by the holder while it exists | its holder |
 | `requests/` | maitred user | `1777`, like `tickets/` | nobody; holds one directory per ticket |
 | `requests/<ticket-id>/` | the ticket's owner | `0700`, created before the ticket: only the same user can send a request | the owner (its `project` file); senders of the same uid |
-| `pools/<pool>/<n>` | maitred user | `0755` dir, `0644` empty files, one per slot, made at install from the machine config | never written; a slot is taken by locking its file |
+| `orphans/` | maitred user | `1777` dir; records `0600`, so only their owner reads them | `maitred clean`: the `expired` records of tickets whose project no worktree is used from |
+| `pools/<pool>/<n>` | maitred user | `0755` dir, `0644` empty files, one per slot, kept in line with the machine config by the sampler (Pools change while running) | never written; a slot is taken by locking its file |
 | `load/` and everything in it | maitred user | `0755` dir, `0644` files | the sampler only |
 | `seq` | maitred user | `0666`, made at install | the creator of each new ticket, under `admit.lock`: the last `seq` given out |
 | `order` | maitred user | `0644`, made at install | `maitred queue move` as root or the maitred user, under `admit.lock`: the moved tickets and their positions |
@@ -101,6 +102,10 @@ These modes separate users. Between processes of one user, which is what agents 
 **No machine root, no queue.** When the machine root doesn't exist, `maitred -- <cmd>` warns once and runs the command straight through, with no ticket and no record, so scripts and hooks that call maitred keep working on CI runners and machines nobody has set up. A root that exists but is on a network filesystem or not owned as installed is an error (69): that is a broken install, not a missing one.
 
 **Slot pools.** A pool is declared in the machine config with a name, a size and the environment variable that carries the number, such as `test_env`, 16, `TEST_ENV_NUMBER`. A slot is taken by holding an exclusive lock on its file, so a free lock is a free slot, with nothing to clean up. Only the admitter ever locks slot files: under `admit.lock` it tries the lowest number no ticket names, takes the next one if that try fails, and writes the number into its ticket. Every other reader learns which slots are taken from the tickets' `slots`, never by locking, so a `status` can't make an admission fail. The locked descriptor goes to the holder at its start and from the holder to the job and everything the job starts, and the supervisor keeps its own copy until it has seen the session empty. So a slot stays taken for exactly as long as anything that might still use its number is alive: the job, a holder whose supervisor has died, a stopped job, a kept leftover, or a daemon the job left behind with `setsid`. The last of those holds a slot with no ticket naming it; `status` lists any taken slot no live ticket names as held outside any ticket, since flock can't say by whom. First-in never waives a slot: a job that asks for one waits for a free one. Agents can't delete the slot files: they are the maitred user's, in a directory only it writes.
+
+**Each pool describes its numbers.** A pool's entry in the machine config gives its name, its size, the variable that carries the number, its `first` number (default 1), and `empty_first`, which passes the first slot as an empty string (parallel_tests' convention, where the first process's `TEST_ENV_NUMBER` is empty and the rest are 2, 3 and so on). Its numbers run from `first` to `first + size - 1`. A job takes at most one slot from each pool, however many of its programs ask for that pool.
+
+**Pools change while running.** Every pass reads the machine config, so a new pool or a new size takes effect at the next pass. The sampler, the only process that writes in the machine root, keeps `pools/` in line with the config on every sample: it creates a missing slot file, and removes a file outside the pool's range once its lock is free. A pool that shrinks retires numbers rather than removing them: a number outside the range is never handed out again and uses up none of the range, but a job holding one keeps it until nothing that might use it is alive. If the sampler is down when a pool grows, the new slot files don't exist yet, so the admitter can't lock them and treats them as taken: the job waits, and `status` says why. It never double-books.
 
 ### Locks that can't be fooled
 
@@ -330,7 +335,7 @@ Only the ticket's own uid can write into its request directory. A same-uid reque
 - **Charged** only when running, from this boot and namespace, with its holder alive: its pid answers `kill(pid, 0)` with success or EPERM (another user's process, which a sandboxed reader can't inspect), it isn't a zombie, and its start time still matches where it is readable. A charged orphan that can't be checked further stays charged, and `status` flags it for its owner or root (`maitred clean --all`).
 - **Adopted** with `maitred wait <id>`: same project and uid; the command in `job.json` must still match the project's class file; confirmed at an interactive terminal (the same `isatty` limit); refused while its holder is alive. The table in Ticket state machine gives each outcome.
 - **Not waited on blindly.** A `wait` that isn't at a terminal never adopts. On an orphan whose holder is gone it exits at once (69) and says the job ended without a record, so it is safe to run again. On one whose holder is alive it waits until the holder is gone, then exits the same way and says the outcome is unknown; it never returns while the job still runs, because the obvious next step, running it again, would run it twice.
-- **Expired** after `orphan_ttl` (default 24 h): the sweep writes an `expired` record into the project (its path is in the request directory) and deletes the ticket.
+- **Expired** after `orphan_ttl` (default 24 h): the sweep writes an `expired` record and then deletes the ticket. The record goes to the project's worktree named in the request directory; if that directory or worktree is gone, to the sweeping supervisor's own worktree, which is the same project (the same hash). A ticket whose project no worktree is used from again is never reached by a sweep: `maitred clean`, run by the same user from anywhere, writes its record to the machine root's `orphans/` and deletes it, and `status` lists that user's records there. Either way the record exists before the ticket is gone.
 
 ### The sweep
 
