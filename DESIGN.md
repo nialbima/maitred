@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 532, 2026-10-15):
+  Synced from the maitred design doc on claude.ai (rev 533, 2026-10-15):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -161,7 +161,7 @@ Every waiting supervisor runs the same pure function over the same state, under 
 - **No reliable load, one at a time.** If the load file is stale, or a critical reading (CPU, memory) is missing, admission falls back to one job at a time. It never waits forever on a missing number.
 - **What is free** is measured free capacity, minus what admitted jobs have reserved but aren't using yet. A job whose supervisor hasn't reported its use holds its whole reservation. A job that asks for a slot fits only when its pool has a free one.
 - **Queue order is kept, with backfill.** Tickets are considered in queue order. A ticket that has waited past the aging time, and that only the budget is keeping out (not its class's rules), holds its reservation out of what is free, so later, smaller jobs can only fill around it, and it starts as soon as that space is really free.
-- **Nobody waits on their own size.** When nothing maitred admitted is running, the first ticket its class allows gets in even if its reservation exceeds the budget. It never overrides a class rule or the live limits.
+- **Nobody waits on their own size.** When nothing maitred admitted is running, the first ticket its class allows gets in even if it asks for more cores than the budget has. It never overrides memory, a class rule or the live limits: over-committing memory is what takes a machine down, so a job whose memory doesn't fit waits for memory to come free.
 - **A stalled waiter doesn't block.** A waiting ticket whose supervisor has stopped running passes (stopped by Ctrl-Z, or stuck) neither takes budget nor blocks anyone until it runs again.
 
 **Reservations stop the thundering herd, and nothing a project writes can lower them.** A job takes seconds to ramp up and show in the samples, so ten waiters reading the same quiet snapshot would all start. An admitted job's reservation counts against the budget the moment it is admitted, before any load shows. The machine config sets a minimum reservation per class; a class file or checker can raise a reservation above it, never lower it.

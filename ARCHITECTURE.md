@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 90, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 102, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -136,6 +136,7 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
   "user": 501,
   "project": "7c41e09a5d2b… (a hash of the project's git common directory)",
   "class": "heavy",
+  "label": "nightly-mutants",
   "reservation": { "cpu_millicores": 2000, "mem_mb": 1200 },
   "slots": { "test_env": 3 },
   "flags": ["edited-classes"],
@@ -155,6 +156,7 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
 - `waited_ms` and the aging and hold timers run on the clock that stops while the machine sleeps, so a night's sleep doesn't age a ticket. `last_pass` is when the owner last started a pass, waiting or running; it is written before contending for `admit.lock` and again on every poll interval of the wait for it, so a slow lock never makes a live supervisor look stalled.
 - `leader`: the holder's pid, the session it leads, the job's first process group and the holder's start time. A holder counts as alive only if `kill(pid, 0)` succeeds or fails with EPERM, its start time still matches, and it isn't a zombie (`SZOMB` on macOS, state `Z` on Linux, from the same read): an exited holder its stopped supervisor hasn't reaped yet is dead. A `pgid` or `sid` of 0 or 1 is never accepted.
 - `flags`: how this run differs from an ordinary one, such as `edited-classes` (the class file differed from the committed or the default branch's copy) or `recreated` (the ticket was deleted under it).
+- `label`: the job's `--label`, or null. `wait --label` and `status` find jobs by it, and the test kit maps tickets to a scenario's jobs by it.
 - The job's use isn't in the ticket: its holder writes it to `tickets/<id>.use` on every pass, because the holder keeps measuring while the supervisor is stopped, stuck or dead.
 
 ### Requests
@@ -213,7 +215,7 @@ waiting = living waiting tickets that aren't stalled, by (seq, id)
 if any ticket's recreated_at is recent:
     wait(tickets being recreated)
 if load is stale, or a critical reading (cpu, memory) is missing:
-    admit me only if charged is empty and I am first in waiting      # plain-lock fallback; nobody counts as stalled
+    admit me only if no living ticket is charged and I am first in waiting      # plain-lock fallback; nobody counts as stalled
     else wait(no reliable load)
 if mem_available < mem_floor or cpu_pressure > cpu_ceiling or gpu_used > gpu_ceiling:
     wait(live limits)
@@ -229,13 +231,15 @@ for t in waiting:
         if t is me: admit
         if t is quiet: stop the walk                                    # nothing starts beside it, even in this walk
         free -= reserve(t); update counts and last_heavy as if t were admitted
-    else if no living ticket is charged and nothing admitted yet in this walk and allowed(t, ...) and t's slots are free:
-        if t is me: admit                                               # first in: waives only cores and memory
+    else if no living ticket is charged and nothing admitted yet in this walk and allowed(t, ...) and t's slots are free and reserve(t).mem fits free.mem:
+        if t is me: admit                                               # first in: waives only cores
         stop the walk
-    else if t is quiet and is due (past quiet_max_wait, not past quiet_max_wait + quiet_hold):
+    else if t is quiet and is due (past quiet_max_wait):
         stop the walk                                                   # let the machine drain for it
     else if t is aged and allowed(t, ...) and its hold hasn't lapsed:
         free -= reserve(t)                                              # only the budget keeps it out: hold its place
+    else if t isn't quiet and its hold has lapsed:
+        stop the walk                                                   # drain the machine for it, then first in
 wait(the first rule that held me)
 ```
 
@@ -245,9 +249,9 @@ wait(the first rule that held me)
 | `used` | a running ticket's use as the sampler copied it into the current sample (`jobs` in `load/now.json`) from the job's holder, which writes it every pass; only a measurement whose window overlaps the sample's own interval is copied. Otherwise 0, so the ticket holds its whole reservation. Taking both terms from one sample keeps a job from falling out of both. Orphans and unknown tickets count as using nothing |
 | `cpu_pressure` | runnable work per core over the last sample interval, from the load file (Sampler); not utilisation, which reads 100% for one healthy build on every core |
 | allowed | **light:** always. **heavy:** fewer than `max_running.heavy` charged or admitted on paper, and `now - last_heavy >= settle`. **quiet:** no living ticket charged or admitted on paper, and `quiet_streak >= 2` in the load file; or it has waited past `quiet_max_wait`, in which case the streak isn't needed and its record is marked `tainted` |
-| aged | waited past `aging` (any class), counted on the clock that stops in sleep. An aged ticket that its class allows but the budget doesn't holds its reservation out of `free`, so later tickets can only fill around it, and it gets in as soon as the budget it holds is really free. The hold lapses after `aging_hold` more, so a ticket that can never fit doesn't block everyone behind it for ever. One that its class rules keep out (settle, `max_running`) holds nothing, since holding budget wouldn't let it in sooner |
-| due quiet | past `quiet_max_wait`, a quiet ticket stops the walk so the machine drains for it; after `quiet_hold` more it stops doing so, and waits for the first moment no living ticket is charged |
-| first in | when no living ticket is charged, the first ticket that its class allows gets in even if its cores or memory exceed the budget. It never waives a slot, a class rule or the live limits. A charged orphan doesn't count: its load is in the sample, and an orphan that never ends must not keep every large job out for ever |
+| aged | waited past `aging` (any class), counted on the clock that stops in sleep. An aged ticket that its class allows but the budget doesn't holds its reservation out of `free`, so later tickets can only fill around it, and it gets in as soon as the budget it holds is really free. The hold lapses after `aging_hold` more, so a ticket that can't fit doesn't block everyone behind it for ever; from then on it drains the machine instead, as a due quiet ticket does: the walk stops at it, nothing new starts, and once no living ticket is charged it gets in first. So every ticket is admitted eventually, at the cost of the queue waiting for the longest job running when the drain began. One that its class rules keep out (settle, `max_running`) holds nothing, since holding budget wouldn't let it in sooner |
+| due quiet | past `quiet_max_wait`, a quiet ticket stops the walk so the machine drains for it, until it gets in. Draining is what gives a job that needs an idle machine its empty queue under steady traffic; what draining can't remove (load from outside maitred) is why it then runs tainted. Like first-in, it never waives memory |
+| first in | when no living ticket is charged, the first ticket that its class allows gets in even if its cores exceed the budget. It never waives memory (over-committing memory is what takes a machine down, so a job whose memory doesn't fit waits for memory to come free, however long), a slot, a class rule or the live limits. A charged orphan doesn't count: its load is in the sample, and an orphan that never ends must not keep every large job out for ever. The plain-lock fallback ignores a charged orphan for the same reason, though without load figures nothing sees what it uses |
 | stalled | a waiting ticket whose `last_pass` is older than 5 poll intervals: its supervisor is stopped or stuck, so it neither takes budget nor blocks anyone; it is admitted again when it next runs a pass. Nobody is judged stalled while the load file is stale, or until the stall limit has passed since the machine last woke (`woke_at`), so after a sleep nobody jumps the queue while the others are still waking |
 | orphan charge | a running orphan whose holder is alive is charged its reservation, but its class's barrier doesn't apply: an orphaned quiet job doesn't stop the queue, and `status` says why it is charged |
 | ties | equal `admitted_at` (recency in the kill policy) or equal `seq` are broken by ticket id, so every reader orders them the same way |
@@ -618,7 +622,7 @@ Every job in every scenario is `burn`, so a scenario states exactly what load it
 
 The test kit doesn't speed time up. Every duration maitred waits on is a named value in the machine config or a named constant that debug builds let the config override, and the test machine config sets short ones. A test that reads its config shows exactly how fast it runs. Shrinking every interval by one global factor would let scheduler jitter dominate and change which races are being tested. `bin/check` refuses a bare duration literal outside the config module.
 
-Already machine config: `sample_interval`, `poll_interval`, `grace`, `settle`, `aging`, `aging_hold`, `quiet_max_wait`, `quiet_hold`, `orphan_ttl`, `kill_wait`. Named constants until now written inline in this document, each overridable in debug builds:
+Already machine config: `sample_interval`, `poll_interval`, `grace`, `settle`, `aging`, `aging_hold`, `quiet_max_wait`, `orphan_ttl`, `kill_wait`. Named constants until now written inline in this document, each overridable in debug builds:
 
 | Constant | Default | What it times |
 | --- | --- | --- |
