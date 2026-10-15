@@ -1,0 +1,44 @@
+# cargo-deny: the Packages section of ARCHITECTURE.md, enforced.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# Permissive licences compatible with maitred's MIT OR Apache-2.0; anything else fails.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    # Rejected in ARCHITECTURE.md's Packages table, with the reason there.
+    { crate = "sysinfo", reason = "group_id() is the user's gid, not the process group; no proportional size" },
+    { crate = "gix", reason = "128 crates for a handful of reads; we run git" },
+    { crate = "git2", reason = "needs a C compiler; we run git" },
+    { crate = "nix", reason = "rustix covers what we need" },
+    { crate = "process-wrap", reason = "no wait with a timeout, pulls in nix" },
+    { crate = "command-group", reason = "unmaintained since 2023" },
+    { crate = "rand", reason = "getrandom is enough for ids" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

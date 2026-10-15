@@ -1,6 +1,28 @@
-[package]
-name = "maitred"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
 
-[dependencies]
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# std's File::lock, which the locking rests on, is stable from 1.89. CI builds at exactly this version.
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+maitred-core = { path = "crates/maitred-core" }
+maitred-scenario = { path = "crates/maitred-scenario" }
+maitred-sim = { path = "crates/maitred-sim" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stderr = "warn"

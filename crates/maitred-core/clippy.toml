@@ -1,0 +1,33 @@
+# The core decides and touches nothing: everything it needs arrives as an argument (ARCHITECTURE.md,
+# Process model and modules). These keep files, processes, clocks, the environment and the network out.
+disallowed-types = [
+    { path = "std::fs::File", reason = "the core touches no files" },
+    { path = "std::fs::OpenOptions", reason = "the core touches no files" },
+    { path = "std::process::Command", reason = "the core starts no processes" },
+    { path = "std::process::Child", reason = "the core starts no processes" },
+    { path = "std::time::Instant", reason = "the core reads no clock: time arrives in the snapshot" },
+    { path = "std::time::SystemTime", reason = "the core reads no clock: time arrives in the snapshot" },
+    { path = "std::net::TcpStream", reason = "the core touches no network" },
+    { path = "std::net::TcpListener", reason = "the core touches no network" },
+    { path = "std::net::UdpSocket", reason = "the core touches no network" },
+    { path = "std::thread::Thread", reason = "the core is single-threaded and pure" },
+]
+disallowed-methods = [
+    { path = "std::fs::read", reason = "the core touches no files" },
+    { path = "std::fs::read_to_string", reason = "the core touches no files" },
+    { path = "std::fs::write", reason = "the core touches no files" },
+    { path = "std::fs::remove_file", reason = "the core touches no files" },
+    { path = "std::fs::create_dir_all", reason = "the core touches no files" },
+    { path = "std::fs::metadata", reason = "the core touches no files" },
+    { path = "std::env::var", reason = "the core reads no environment" },
+    { path = "std::env::var_os", reason = "the core reads no environment" },
+    { path = "std::env::vars", reason = "the core reads no environment" },
+    { path = "std::env::args", reason = "the core reads no environment" },
+    { path = "std::env::current_dir", reason = "the core reads no environment" },
+    { path = "std::process::exit", reason = "the core starts and stops no processes" },
+    { path = "std::process::id", reason = "the core reads no process state" },
+    { path = "std::thread::sleep", reason = "the core reads no clock" },
+    { path = "std::thread::spawn", reason = "the core is single-threaded and pure" },
+    { path = "std::time::Instant::now", reason = "the core reads no clock" },
+    { path = "std::time::SystemTime::now", reason = "the core reads no clock" },
+]

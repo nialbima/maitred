@@ -1,0 +1,15 @@
+[package]
+name = "maitred-sim"
+description = "maitred's deterministic simulator: runs a test-kit scenario against the core, never shipped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+maitred-core.workspace = true
+maitred-scenario.workspace = true
+
+[lints]
+workspace = true

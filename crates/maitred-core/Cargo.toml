@@ -1,0 +1,13 @@
+[package]
+name = "maitred-core"
+description = "maitred's decisions: pure functions that touch no file, clock, process or environment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

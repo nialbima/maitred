@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: bin/check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny,cargo-machete
+      - run: bin/check
+
+  msrv:
+    name: builds at rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          msrv=$(sed -nE 's/^rust-version = "([0-9.]+)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" build --workspace --locked
+
+  container:
+    name: Linux container (${{ matrix.limits }})
+    strategy:
+      fail-fast: false
+      matrix:
+        limits: ["--memory=2g --cpus=2", "none"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          limits="${{ matrix.limits }}"
+          [ "$limits" = none ] && limits=""
+          docker run --rm $limits -v "$PWD:/src" -w /src rust:1 \
+            bash -c 'cargo install --locked cargo-nextest && cargo nextest run --workspace --locked --no-tests=pass'

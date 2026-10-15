@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Every check maitred's CI runs, in the same order, so local and CI never disagree.
+# Usage: bin/check
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+need() {
+  command -v "$1" >/dev/null || { echo "bin/check: $1 is not installed (see ARCHITECTURE.md, Build order, phase 0)" >&2; exit 1; }
+}
+step() { printf '\n== %s\n' "$*"; }
+
+need cargo-deny
+need cargo-machete
+need cargo-nextest
+
+step "format"
+cargo fmt --all --check
+
+step "lints"
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+step "dependencies (licences, sources, duplicates, bans, advisories)"
+cargo deny --locked check
+
+step "unused dependencies"
+cargo machete
+
+step "durations live in the config"
+# ARCHITECTURE.md, Test kit, Time: no bare duration literal outside a config module.
+if offenders=$(grep -rnE 'Duration::from_(secs|millis|micros|nanos|secs_f32|secs_f64)\(' crates --include='*.rs' \
+  | grep -vE '/(config|config/[^:]*)\.rs:' ); then
+  echo "$offenders"
+  echo "bin/check: a duration literal outside the config module; name it in the config instead" >&2
+  exit 1
+fi
+
+step "tests"
+cargo nextest run --workspace --locked --no-tests=pass
+
+step "docs"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+
+printf '\nbin/check: all green\n'
