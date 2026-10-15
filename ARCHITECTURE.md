@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 89, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 90, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -227,6 +227,7 @@ counts   = running heavy count; last_heavy = last heavy admission
 for t in waiting:
     if allowed(t, counts, last_heavy, load) and reserve(t) fits free:
         if t is me: admit
+        if t is quiet: stop the walk                                    # nothing starts beside it, even in this walk
         free -= reserve(t); update counts and last_heavy as if t were admitted
     else if no living ticket is charged and nothing admitted yet in this walk and allowed(t, ...) and t's slots are free:
         if t is me: admit                                               # first in: waives only cores and memory
