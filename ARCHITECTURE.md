@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 102, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 105, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -92,6 +92,8 @@ Every file has one owner, one stated mode and one writer; a ticket is rewritten 
 | `requests/<ticket-id>/` | the ticket's owner | `0700`, created before the ticket: only the same user can send a request | the owner (its `project` file); senders of the same uid |
 | `pools/<pool>/<n>` | maitred user | `0755` dir, `0644` empty files, one per slot, made at install from the machine config | never written; a slot is taken by locking its file |
 | `load/` and everything in it | maitred user | `0755` dir, `0644` files | the sampler only |
+| `seq` | maitred user | `0666`, made at install | the creator of each new ticket, under `admit.lock`: the last `seq` given out |
+| `order` | maitred user | `0644`, made at install | `maitred queue move` as root or the maitred user, under `admit.lock`: the moved tickets and their positions |
 | machine config: `/Library/Application Support/maitred/config.toml`, `/etc/maitred/config.toml` | root | `0644` | an administrator |
 
 These modes separate users. Between processes of one user, which is what agents of one person are, they separate nothing: any of them can delete or rewrite another's tickets, and maitred makes no claim otherwise (design, Principle and threat model). There is no per-user state outside the machine root and the projects: what the sweep needs to find a ticket's project sits in `requests/<ticket-id>/project`, readable only by the ticket's owner. `maitred install claude-code` adds exactly two machine paths to the agent sandbox's write allowlist, `tickets/` and `requests/`, after showing the change; the sampler's files stay unwritable. The Linux root lives under `/var/lib`, not `/var/tmp`, so no temporary-file cleaner ages out its lock files; the install also drops a `tmpfiles.d` exclusion for anyone who moves it. The machine root's path and the `--machine-config <path>` flag can be changed only in debug builds; both are compiled out of releases.
@@ -122,7 +124,7 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
 - **Reading.** Read both slots in one 8 KiB read, keep those that pass, take the higher generation. If neither passes, read again, up to three times; a reader that still finds no valid slot treats the ticket as unknown (Versions).
 - **Creating without a gap.** Create `requests/<id>/` (mode `0700`; if it already exists and isn't ours, pick a new id), write its `project` file, then create `tickets/.new-<id>`, lock it, write the first slot and rename it to `<id>.tk`. A rename keeps the inode, and the lock lives on the inode, so the ticket appears already locked.
 - **Still mine?** On every pass a supervisor checks that the inode at its ticket's path is the one it holds locked, and that its request directory and `project` file are still there. If either was deleted (an agent tidying `tickets/` or `requests/`), it recreates it under `admit.lock`, keeping its `seq`, sets `recreated_at`, and warns; the record notes it. While any ticket's `recreated_at` is recent (within the stall limit), `decide` admits nobody and `choose_victim` chooses nobody, because other deleted tickets may not have come back yet.
-- **Ids.** `<unix-ms, hex>-<64 random bits, hex>`. Queue order is `(seq, id)`, so two tickets that end up with one `seq` still sort the same way for every reader.
+- **Ids.** `<unix-ms, hex>-<64 random bits, hex>`. Queue order is `(position, id)`, where a ticket's position is `(seq, 0)` unless an administrator moved it (Moving a ticket), so two tickets that end up with one position still sort the same way for every reader.
 
 ### The ticket's payload
 
@@ -149,7 +151,7 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
 }
 ```
 
-- `seq`: under `admit.lock`, one more than the larger of the largest `seq` in any ticket's header and the sampler's published high-water mark (`seq_high` in `load/now.json`), so deleting every ticket can't restart the count and put a newcomer ahead of tickets that come back.
+- `seq`: under `admit.lock`, one more than the largest of the machine root's `seq` counter, the largest `seq` in any ticket's header, and the sampler's high-water mark (`seq_high` in `load/now.json`); the creator writes the new value back to `seq`. Agents can't delete the counter (the root is the maitred user's), and taking the largest of three sources means a counter set lower changes nothing and one set higher only skips numbers. So neither deleting every ticket nor restarting the sampler can put a newcomer ahead of tickets that come back.
 - `boot`: read by the supervisor itself: Linux `/proc/sys/kernel/random/boot_id`; on macOS, the start time of process 1 from `sysctl` `KERN_PROC_PID`, which a sandbox allows. No dependence on the sampler.
 - `pidns`: the pid namespace on Linux; empty on macOS. Process ids are only compared within one boot and namespace.
 - `project`: the first 16 bytes of SHA-256 over the real path of the project's git common directory (or of its `.maitred/` outside git). Every worktree gets the same value, and two racing first runs can't disagree, since nothing is stored. The label is never shown to other users; `status` shows other users' tickets as user, class, reservation and state only.
@@ -164,6 +166,8 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
 `requests/<ticket-id>/`, created by the ticket's owner with mode `0700` before the ticket itself, holds `project` (the real paths of the project's working tree and its git common directory) and the requests: `<request-id>.json`, written once (temporary name, then rename), with `kind` (`cancel`, `update` or `nested`), the change, the sender's project, working directory, ticket (if it has one) and pid, and a reason. The target's supervisor applies or rejects each one, notes it in the record, and deletes it. A `nested` note is how a nested run tells its parent it ran, so the parent's record can list it. Another user can't write here at all; a person who needs to cancel another user's job does it as that user (`sudo -u`) or as root.
 
 **The stop marker.** `tickets/<id>.stop` is created exclusively by the job's holder when `choose_victim` names it, and holds the threshold and the time of the kill. The holder keeps it locked until the job is gone (or its bounded wait has passed) and the sample after has been published, then deletes it. On every pass while it exists, the holder checks that the inode at the path is the one it holds locked, and recreates it if it was deleted (an agent tidying `tickets/`); while a ticket's marker is being recreated, its `recreated_at` freezes `choose_victim` as for a deleted ticket. A marker whose lock is free belongs to a dead holder, and readers ignore it.
+
+**Moving a ticket.** An administrator reorders the queue with `maitred queue move <id> --before|--after <other-id>`, run as root or the maitred user. It takes `admit.lock`, writes the moved ticket's position into the machine root's `order` file (temporary name, then rename), and releases the lock. A position is the other ticket's `seq` with a smaller or larger `sub` than any position already there, so the moved ticket sorts just before or after it; nobody's ticket or `seq` changes, so the invariant that only a ticket's owner writes it still holds. Since every decision is made under `admit.lock`, no waiter ever sees half a move, and nothing needs pausing. Entries whose ticket is gone are ignored, and the sweep drops them. The ticket's record notes that it was moved, and by whom. Moving changes only order: a moved ticket still meets its class rules, the budget, its slots and the live limits, and a ticket draining the machine keeps draining. Owners can't move their own tickets in v1, since moving ahead of another user's is jumping the queue; they can cancel and resubmit.
 
 ### Project files
 
@@ -197,7 +201,7 @@ A waiting supervisor, every `poll_interval` (default 2 s, with up to 20% jitter)
 
 1. Writes `last_pass` into its own ticket (its own lock is enough) and checks the ticket and its request directory are still its own (Files).
 2. Takes `admit.lock` (with the deadline and inode check above), rewriting `last_pass` every poll interval while it waits, so a long wait for the lock never makes it look stalled. Its signal thread defers a Ctrl-Z that arrives while it holds the lock until the lock is released, so a stopped supervisor never holds it.
-3. Builds the snapshot: every ticket's header, payload and liveness (a shared try-lock each), every stop marker and whether its lock is held, `load/now.json` and its age, the last heavy admission (the latest of `load/admissions.jsonl` and the `admitted_at` of living heavy tickets), the machine config, and `now`.
+3. Builds the snapshot: every ticket's header, payload and liveness (a shared try-lock each), every stop marker and whether its lock is held, `load/now.json` and its age, the last heavy admission (the latest of `load/admissions.jsonl` and the `admitted_at` of living heavy tickets), the moves in `order`, the machine config, and `now`.
 4. Runs `decide`.
 5. On **Admit**: writes its ticket as `admitted`, takes the lowest free slot of each pool its rule asks for and writes the numbers into the ticket, all still holding the lock, so the next snapshot already charges it; releases the lock; starts the job.
 6. On **Wait(reason)**: writes `waited_ms` and the reason; releases the lock; prints the reason if it changed; sleeps.
@@ -210,7 +214,7 @@ All CPU figures are millicores and all memory figures megabytes; the sampler con
 charged = living tickets that are admitted or running
         + orphaned running tickets of this boot and namespace whose holder is alive   # reservation only
         + locked tickets with no readable slot (heavy minimum)
-waiting = living waiting tickets that aren't stalled, by (seq, id)
+waiting = living waiting tickets that aren't stalled, by (position, id)
 
 if any ticket's recreated_at is recent:
     wait(tickets being recreated)
@@ -312,6 +316,7 @@ In v1 the job gets pipes, never a terminal; terminal mode comes after v1, with t
 | chosen by the kill policy | not applicable | the holder marks it, then TERM, CONT, KILL after `grace`; record `killed` with the threshold |
 | supervisor killed with KILL | orphan, waiting; the parked holder exits | orphan, running; the job runs on under its holder, which still measures it, logs its output and carries out a kill |
 | holder lost | the supervisor starts a new one | the supervisor stops the session; record `holder lost` |
+| `maitred queue move <id> --before\|--after <other-id>` | none; root or the maitred user only | 0 once `order` is written; 77 when not run by root or the maitred user |
 
 Signals are handled on one thread, which is how a Ctrl-Z that arrives while the supervisor holds `admit.lock` is deferred until the lock is released. SIGSTOP can't be deferred: a supervisor or holder stopped that way while holding `admit.lock` stalls admission and the kill policy until it is continued (Risks). `grace` (default 10 s), `poll_interval` and `kill_wait` are measured on a clock that keeps counting through sleep, so a grace period that spans a sleep has expired on waking; `waited_ms` and the aging timers use the one that stops.
 
@@ -502,7 +507,7 @@ These use the BSD `sysexits` values where one fits. None is unique, because a jo
 | 69 | the machine root is on a network filesystem or not owned as installed; `wait` found the run `lost`; a non-interactive `wait` found an orphan; a cancel named an orphan; `submit` on a machine without maitred installed |
 | 73 | the project's records directory can't be written |
 | 75 | `--timeout` passed before admission |
-| 77 | refused by a rule: `none`, a keep-awake wrapper, a nested command its parent can't cover, `submit` inside a job, scope |
+| 77 | refused by a rule: `none`, a keep-awake wrapper, a nested command its parent can't cover, `submit` inside a job, scope, `queue move` run by anyone but root or the maitred user |
 | 78 | no project: outside git, with no `.maitred/` above the working directory |
 | 128 + n | maitred stopped the job with signal n (the kill policy, a cancel). When maitred itself was signalled, or the job died by a signal, maitred dies by that signal instead, so the caller sees what a shell would |
 

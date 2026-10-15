@@ -1,2 +1,5 @@
-//! How every phase after the store is verified (ARCHITECTURE.md, Test kit). Owned by the test kit, not
-//! by maitred's builder, and never dependent on the `maitred` crate.
+//! How maitred is verified (ARCHITECTURE.md, Test kit): workloads, replayed load, faults, the invariant
+//! checker and the scenarios. Owned by the test kit, never shipped, and never dependent on the `maitred`
+//! crate.
+
+pub mod timing;
