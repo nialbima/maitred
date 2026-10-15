@@ -29,8 +29,8 @@ pub struct Config {
     /// The quiet streak, in samples, that lets a quiet job in.
     pub quiet_streak_needed: u32,
     pub class_min: ClassMinimums,
-    /// Each declared pool and its size.
-    pub pools: BTreeMap<Pool, u32>,
+    /// Each declared pool and its range of numbers.
+    pub pools: BTreeMap<Pool, PoolConfig>,
 }
 
 impl Config {
@@ -64,5 +64,22 @@ impl ClassMinimums {
             Class::Heavy => self.heavy,
             Class::Quiet => self.quiet,
         }
+    }
+}
+
+/// A slot pool's numbers: `first` to `first + size - 1`. How a number is written for the job (the
+/// variable, an empty first slot) is the supervisor's business, not the core's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolConfig {
+    pub first: u32,
+    pub size: u32,
+}
+
+impl PoolConfig {
+    /// Whether `n` is one of this pool's numbers. A number outside the range is retired (the pool
+    /// shrank): its holder keeps it until it ends, but it uses up none of the range.
+    #[must_use]
+    pub fn contains(&self, n: u32) -> bool {
+        n >= self.first && n - self.first < self.size
     }
 }

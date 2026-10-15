@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    ClassMinimums, Config, Liveness, Load, Pool, Position, Resources, Snapshot, State, Ticket,
-    TicketId, Wall,
+    ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources, Snapshot, State,
+    Ticket, TicketId, Wall,
 };
 
 const NOW: Wall = Wall(1_000_000_000);
@@ -612,7 +612,9 @@ fn first_in_never_waives_a_slot() {
     mine.reservation = Resources::new(64_000, 64_000);
     mine.pools.insert(pool.clone());
     let mut snap = snapshot(vec![holder, mine]);
-    snap.config.pools.insert(pool.clone(), 1);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
 }
@@ -970,7 +972,9 @@ fn a_ticket_waits_when_every_slot_of_its_pool_is_named() {
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.pools.insert(pool.clone());
     let mut snap = snapshot(vec![holder, mine]);
-    snap.config.pools.insert(pool.clone(), 1);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
 }
@@ -983,7 +987,9 @@ fn a_ticket_gets_a_free_slot() {
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.pools.insert(pool.clone());
     let mut snap = snapshot(vec![holder, mine]);
-    snap.config.pools.insert(pool, 2);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 2 });
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
@@ -996,7 +1002,9 @@ fn a_slot_taken_on_paper_earlier_in_the_walk_is_not_free() {
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.pools.insert(pool.clone());
     let mut snap = snapshot(vec![ahead, mine]);
-    snap.config.pools.insert(pool.clone(), 1);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
 }
@@ -1014,7 +1022,9 @@ fn a_slot_named_by_a_ticket_out_of_any_charge_is_still_not_free() {
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.pools.insert(pool.clone());
     let mut snap = snapshot(vec![orphan, mine]);
-    snap.config.pools.insert(pool.clone(), 1);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
 }
@@ -1165,4 +1175,78 @@ fn a_move_of_a_ticket_that_no_longer_exists_changes_nothing() {
         .insert(TicketId("gone".into()), Position { seq: 0, sub: 0 });
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
+}
+
+#[test]
+fn a_slot_number_outside_the_pools_range_does_not_use_up_a_slot() {
+    // The pool shrank from 5 to 1: a job still holding the retired number 5 keeps it until it ends,
+    // but the one number in range is free.
+    let pool = Pool("test_env".into());
+    let mut holder = ticket("holder", 1, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 5);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![holder, mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_slot_number_below_the_first_does_not_use_up_a_slot() {
+    let pool = Pool("test_env".into());
+    let mut holder = ticket("holder", 1, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 0);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![holder, mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn the_last_number_in_a_pools_range_is_in_it() {
+    let pool = Pool("test_env".into());
+    let mut holder = ticket("holder", 1, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 3);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![holder, mine]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 3, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
+}
+
+#[test]
+fn a_pool_the_machine_does_not_declare_has_no_slot() {
+    let pool = Pool("undeclared".into());
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+
+    assert_eq!(
+        decide(&snapshot(vec![mine]), &me()),
+        Decision::Wait(Reason::NoSlot(pool))
+    );
+}
+
+#[test]
+fn the_number_just_past_a_pools_range_does_not_use_up_a_slot() {
+    let pool = Pool("test_env".into());
+    let mut holder = ticket("holder", 1, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 2);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![holder, mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
 }

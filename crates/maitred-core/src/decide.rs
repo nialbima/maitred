@@ -251,15 +251,18 @@ fn waiting(snap: &Snapshot, skip_stalled: bool) -> Vec<&Ticket> {
 /// Whether each pool `t` asks of has a slot no ticket names and nobody earlier in this walk took.
 fn slots_free(snap: &Snapshot, t: &Ticket, on_paper: &BTreeMap<Pool, u32>) -> Result<(), Reason> {
     for pool in &t.pools {
-        let size = snap.config.pools.get(pool).copied().unwrap_or(0);
+        // An undeclared pool has no slots; a number outside the range is retired and uses none.
+        let Some(cfg) = snap.config.pools.get(pool) else {
+            return Err(Reason::NoSlot(pool.clone()));
+        };
         let named = snap
             .tickets
             .iter()
-            .filter(|o| o.slots.contains_key(pool))
+            .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
             .count();
         let taken = u64::try_from(named).unwrap_or(u64::MAX)
             + u64::from(on_paper.get(pool).copied().unwrap_or(0));
-        if taken >= u64::from(size) {
+        if taken >= u64::from(cfg.size) {
             return Err(Reason::NoSlot(pool.clone()));
         }
     }

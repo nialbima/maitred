@@ -14,7 +14,7 @@ mod resources;
 mod snapshot;
 mod ticket;
 
-pub use config::{ClassMinimums, Config};
+pub use config::{ClassMinimums, Config, PoolConfig};
 pub use decide::{Admission, Decision, Limit, Reason, decide};
 pub use resources::Resources;
 pub use snapshot::{Load, Snapshot};

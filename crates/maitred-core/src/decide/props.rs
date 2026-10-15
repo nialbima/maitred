@@ -8,7 +8,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::{
-    ClassMinimums, Config, Liveness, Load, Pool, Resources, Snapshot, State, Ticket, TicketId, Wall,
+    ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Resources, Snapshot, State, Ticket,
+    TicketId, Wall,
 };
 
 const NOW: Wall = Wall(1_000_000_000);
@@ -151,7 +152,17 @@ fn snapshot() -> impl Strategy<Value = Snapshot> {
                         heavy: heavy_min,
                         quiet: Resources::default(),
                     },
-                    pools: [(Pool(POOLS[0].into()), db), (Pool(POOLS[1].into()), port)].into(),
+                    pools: [
+                        (Pool(POOLS[0].into()), PoolConfig { first: 1, size: db }),
+                        (
+                            Pool(POOLS[1].into()),
+                            PoolConfig {
+                                first: 1,
+                                size: port,
+                            },
+                        ),
+                    ]
+                    .into(),
                 },
                 load,
                 tickets,
@@ -278,11 +289,11 @@ proptest! {
     #[test]
     fn no_two_admissions_take_one_slot(snap in snapshot()) {
         let admitted = admissions(&snap);
-        for (pool, size) in &snap.config.pools {
-            let named = snap.tickets.iter().filter(|t| t.slots.contains_key(pool)).count();
+        for (pool, cfg) in &snap.config.pools {
+            let named = snap.tickets.iter().filter(|t| t.slots.get(pool).is_some_and(|&n| cfg.contains(n))).count();
             let asking = admitted.iter().filter(|(t, _)| t.pools.contains(pool)).count();
             if asking > 0 {
-                prop_assert!(named + asking <= *size as usize);
+                prop_assert!(named + asking <= cfg.size as usize);
             }
         }
     }
