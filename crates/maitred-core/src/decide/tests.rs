@@ -1039,3 +1039,17 @@ fn a_heavy_admitted_earlier_in_the_walk_counts_toward_max_running_heavy() {
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::MaxRunning));
 }
+
+#[test]
+fn nothing_starts_beside_a_quiet_job_admitted_earlier_in_the_walk() {
+    let mut snap = snapshot(vec![
+        ticket("quiet", 1, Class::Quiet, State::Waiting),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.load.as_mut().unwrap().quiet_streak = 2;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::QuietJobRunning)
+    );
+}

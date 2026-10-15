@@ -2,6 +2,8 @@
 
 [graph]
 all-features = true
+# What ships is checked; test-only crates are not (proptest needs rand, which ids must not use).
+exclude-dev = true
 
 [advisories]
 version = 2

@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use crate::{Class, Liveness, Pool, Resources, Snapshot, State, Ticket, TicketId, Wall};
 
 #[cfg(test)]
+mod props;
+#[cfg(test)]
 mod tests;
 
 /// What a waiting supervisor does after one pass.
@@ -137,6 +139,10 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
                         tainted,
                         ..Admission::default()
                     });
+                }
+                // Nothing starts beside a quiet job, including one admitted earlier in this walk.
+                if t.class == Class::Quiet {
+                    return Decision::Wait(Reason::QuietJobRunning);
                 }
                 walk.admit_on_paper(t);
                 continue;
