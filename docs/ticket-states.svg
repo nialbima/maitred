@@ -47,7 +47,7 @@
 
   <rect class="box" x="516" y="96" width="104" height="56" rx="8"/>
   <text class="ink name" x="528" y="120">stopping</text>
-  <text class="quiet small" x="528" y="138">the victim</text>
+  <text class="quiet small" x="528" y="138">holder's mark</text>
 
   <rect class="accent" x="640" y="96" width="96" height="56" rx="8"/>
   <text class="ink name" x="652" y="120">ended</text>
