@@ -26,6 +26,9 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
+# The workspace's own crates depend on each other by path, with no version; cargo-deny accepts that
+# only while they are unpublished (publish = false). Publishing a crate means giving them versions.
+allow-wildcard-paths = true
 highlight = "all"
 deny = [
     # Rejected in ARCHITECTURE.md's Packages table, with the reason there.

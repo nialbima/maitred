@@ -5,9 +5,6 @@ version = 4
 [[package]]
 name = "maitred"
 version = "0.0.0"
-dependencies = [
- "maitred-core",
-]
 
 [[package]]
 name = "maitred-core"
@@ -20,15 +17,7 @@ version = "0.0.0"
 [[package]]
 name = "maitred-sim"
 version = "0.0.0"
-dependencies = [
- "maitred-core",
- "maitred-scenario",
-]
 
 [[package]]
 name = "maitred-testkit"
 version = "0.0.0"
-dependencies = [
- "maitred-scenario",
- "maitred-sim",
-]
