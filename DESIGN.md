@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred design doc on claude.ai (rev 526, 2026-10-15):
+  Synced from the maitred design doc on claude.ai (rev 531, 2026-10-15):
   https://claude.ai/code/artifact/b0753fb5-a907-459b-8266-2b18f0401e5b
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The architecture drawing is docs/architecture.svg, exported from the doc's drawing.
@@ -230,7 +230,7 @@ maitred runs in a standard terminal on macOS and Linux, and inside containers, f
 
 |  | Load and memory | Sleep detection | Keeping the sampler running |
 | --- | --- | --- | --- |
-| macOS | host statistics and memory pressure through system calls; CPU pressure from the run queue per core | `CLOCK_MONOTONIC` minus `CLOCK_UPTIME_RAW` | optional launchd daemon, as the maitred user |
+| macOS | host statistics and memory pressure through system calls; no machine-wide CPU pressure without root, so the CPU kill uses maitred's own jobs' running threads, which each holder counts | `CLOCK_MONOTONIC` minus `CLOCK_UPTIME_RAW` | optional launchd daemon, as the maitred user |
 | Linux | `/proc/stat`, `/proc/meminfo`, and `/proc/pressure/*` for CPU and memory pressure | `CLOCK_BOOTTIME` minus `CLOCK_MONOTONIC` | optional systemd service, as the maitred user |
 | Container or VM | the container's cgroup limits and usage (`memory.max`, `memory.current`, `cpu.max`, `cpu.pressure`), or a VM's own figures as Linux, not the host's load, which it sees but cannot act on | as Linux | the container's entrypoint or the VM's service manager, inside the machine it rations |
 
@@ -340,11 +340,11 @@ A later `maitred install` step could set one of these up, the Linux cgroup wrapp
 
 **To verify before the code depends on them:**
 
-- [ ] The time limit on an agent harness's background call, and whether ending a session kills detached children (decides how much `submit` and `wait` matter).
+- [ ] Whether ending an agent session kills processes its calls left behind (spike, 2026-10-15: they outlive the call; background calls have no limit in interactive sessions and 30 minutes by default in unattended ones). A manual check once `submit` exists.
 - [ ] Whether file locks hold across a host and container boundary on each platform.
-- [ ] A holder reading its own job's CPU and memory from inside a sandbox (`proc_pid_rusage` on macOS, `/proc` on Linux).
-- [ ] A useful CPU pressure figure on macOS without root, and the threshold that separates a busy machine from a starving one.
-- [ ] GPU use readable without root on each platform, Apple Silicon especially.
+- [ ] A holder reading its own job's CPU and memory from inside a sandbox: works on macOS (spike, 2026-10-15: within a few percent, about 1 ms per scan); Linux still to run.
+- [ ] The threshold that separates a busy machine from a starving one. (A machine-wide CPU pressure figure on macOS without root doesn't exist, spike 2026-10-15; the macOS CPU kill uses maitred's own running threads, Nick 2026-10-15.)
+- [ ] GPU use readable without root: Apple Silicon yes through IOKit (spike, 2026-10-15), still to check as the `maitred` user and under a known load; NVIDIA and AMD untested.
 - [ ] Whether `docker compose exec` passes TERM and INT through to maitred inside the container, so a harness's timeout or Ctrl-C reaches the job.
 - [ ] How a slot's number maps onto the work app's `TEST_ENV_NUMBER` conventions, and what a parallel runner started inside one slot does with it.
 - [ ] Which harnesses can deny writes to one file, for the courtesy write-deny entries: Claude Code can; Codex's permission profiles may; Cursor's sandbox has no deny list.
