@@ -1,2 +1,24 @@
 //! The test kit's scenario type and its DSL (ARCHITECTURE.md, Test kit). Owned by the test kit, not by
 //! maitred's builder; it depends on nothing of maitred's.
+//!
+//! A [`Scenario`] says what a run is given: a machine config, jobs that arrive, and faults. The simulator
+//! (`maitred-sim`) and the real-process runner (`maitred-testkit`) each run it and report an [`Outcome`],
+//! and [`Scenario::judge`] checks either one against the same expectations.
+
+mod expect;
+mod fault;
+mod job;
+mod load;
+mod machine;
+mod outcome;
+mod scenario;
+mod time;
+
+pub use expect::{Expect, Failure};
+pub use fault::{Fault, Process, Signal};
+pub use job::{Class, Job};
+pub use load::{Published, Publisher, Reading, Sample};
+pub use machine::{Amount, ClassConfig, MachineConfig, Pool};
+pub use outcome::{End, Outcome, Trigger};
+pub use scenario::{Event, Invalid, Scenario};
+pub use time::{Ms, ms, secs};
