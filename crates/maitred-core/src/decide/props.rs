@@ -157,6 +157,7 @@ fn snapshot() -> impl Strategy<Value = Snapshot> {
                 tickets,
                 unreadable,
                 last_heavy: last_heavy.map(|age| Wall(NOW.0 - age)),
+                moved: BTreeMap::new(),
             },
         )
 }

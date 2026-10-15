@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Class, Liveness, Pool, Resources, Snapshot, State, Ticket, TicketId, Wall};
+use crate::{Class, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId, Wall};
 
 #[cfg(test)]
 mod props;
@@ -222,7 +222,7 @@ fn is_charged(t: &Ticket) -> bool {
     }
 }
 
-/// Living waiting tickets by `(seq, id)`, without the stalled ones when `skip_stalled`.
+/// Living waiting tickets by `(position, id)`, without the stalled ones when `skip_stalled`.
 fn waiting(snap: &Snapshot, skip_stalled: bool) -> Vec<&Ticket> {
     let limit = snap.config.stall_limit_ms();
     // Nobody is judged stalled until the stall limit has passed since the machine last woke.
@@ -237,7 +237,14 @@ fn waiting(snap: &Snapshot, skip_stalled: bool) -> Vec<&Ticket> {
         .filter(|t| t.is_living() && t.state == State::Waiting)
         .filter(|t| !skip_stalled || woke_recently || snap.now.since(t.last_pass) <= limit)
         .collect();
-    tickets.sort_by(|a, b| (a.seq, &a.id).cmp(&(b.seq, &b.id)));
+    // By position, then id: `(seq, 0)` unless an administrator moved the ticket.
+    let position = |t: &Ticket| {
+        snap.moved
+            .get(&t.id)
+            .copied()
+            .unwrap_or(Position { seq: t.seq, sub: 0 })
+    };
+    tickets.sort_by(|a, b| (position(a), &a.id).cmp(&(position(b), &b.id)));
     tickets
 }
 

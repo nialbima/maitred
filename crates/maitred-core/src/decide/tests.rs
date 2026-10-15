@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    ClassMinimums, Config, Liveness, Load, Pool, Resources, Snapshot, State, Ticket, TicketId, Wall,
+    ClassMinimums, Config, Liveness, Load, Pool, Position, Resources, Snapshot, State, Ticket,
+    TicketId, Wall,
 };
 
 const NOW: Wall = Wall(1_000_000_000);
@@ -72,6 +73,7 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         tickets,
         unreadable: 0,
         last_heavy: None,
+        moved: BTreeMap::new(),
     }
 }
 
@@ -1119,4 +1121,48 @@ fn nothing_starts_beside_a_quiet_job_admitted_earlier_in_the_walk() {
         decide(&snap, &me()),
         Decision::Wait(Reason::QuietJobRunning)
     );
+}
+
+#[test]
+fn a_ticket_moved_ahead_is_walked_at_its_new_place() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(4_000, 1_000);
+    let mut early = ticket("early", 1, Class::Light, State::Waiting);
+    early.reservation = Resources::new(3_000, 1_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![running, early, mine]);
+    snap.moved.insert(me(), Position { seq: 1, sub: -1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_ticket_moved_back_lets_the_next_one_go_first() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(4_000, 1_000);
+    let mut early = ticket("early", 1, Class::Light, State::Waiting);
+    early.reservation = Resources::new(3_000, 1_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![running, early, mine]);
+    snap.moved
+        .insert(TicketId("early".into()), Position { seq: 2, sub: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_move_of_a_ticket_that_no_longer_exists_changes_nothing() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(4_000, 1_000);
+    let mut early = ticket("early", 1, Class::Light, State::Waiting);
+    early.reservation = Resources::new(3_000, 1_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![running, early, mine]);
+    snap.moved
+        .insert(TicketId("gone".into()), Position { seq: 0, sub: 0 });
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
 }

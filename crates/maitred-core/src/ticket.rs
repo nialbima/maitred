@@ -14,6 +14,15 @@ impl Wall {
     }
 }
 
+/// Where a ticket sorts in the queue: `(seq, 0)` for every ticket nobody moved. A move puts a ticket
+/// at another's `seq` with a smaller or larger `sub`, so it sorts just before or after that ticket
+/// without anyone's `seq` changing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position {
+    pub seq: u64,
+    pub sub: i64,
+}
+
 /// A ticket's id. Ties in `(seq, id)` order and in recency are broken by it, so every reader orders
 /// tickets the same way.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

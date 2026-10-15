@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Config, Resources, Ticket, TicketId, Wall};
+use crate::{Config, Position, Resources, Ticket, TicketId, Wall};
 
 /// Everything one pass knows, built by the store under `admit.lock` (ARCHITECTURE.md, One pass, step
 /// 3). `decide` and `choose_victim` read nothing else, so every waiter computes the same answer from
@@ -18,6 +18,9 @@ pub struct Snapshot {
     /// The last heavy admission: the latest of `load/admissions.jsonl` and the `admitted_at` of
     /// living heavy tickets.
     pub last_heavy: Option<Wall>,
+    /// Tickets an administrator moved (`maitred queue move`), from the machine root's `order` file:
+    /// each sorts at its position instead of `(seq, 0)`. Ids with no ticket are ignored.
+    pub moved: BTreeMap<TicketId, Position>,
 }
 
 /// The sampler's latest sample, as `load/now.json` holds it.
