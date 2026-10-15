@@ -43,7 +43,7 @@
   <rect class="box" x="24" y="136" width="128" height="88" rx="8"/>
   <text class="ink name" x="40" y="160">supervisor</text>
   <text class="quiet small" x="40" y="182">enqueue, wait,</text>
-  <text class="quiet small" x="40" y="198">run, measure</text>
+  <text class="quiet small" x="40" y="198">holder, record</text>
 
   <rect class="box" x="170" y="136" width="128" height="88" rx="8"/>
   <text class="ink name" x="186" y="160">sampler</text>

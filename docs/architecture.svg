@@ -64,7 +64,7 @@
     <text class="ink name" x="192" y="320">Worker A</text>
     <rect class="box" x="192" y="336" width="240" height="56" rx="8"/>
     <text class="ink name" x="208" y="360">maitred -- make release</text>
-    <text class="quiet small" x="208" y="378">running, heavy; measures the job</text>
+    <text class="quiet small" x="208" y="378">running, heavy; holder measures it</text>
     <rect class="box" x="192" y="416" width="240" height="56" rx="8"/>
     <text class="ink name" x="208" y="440">make release</text>
     <text class="quiet small" x="208" y="458">its own session</text>
