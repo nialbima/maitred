@@ -73,6 +73,15 @@ impl Config {
         if !(self.mem_critical_mb < self.kill_floor_mb && self.kill_floor_mb < self.mem_floor_mb) {
             return Err(ConfigError::MemoryThresholds);
         }
+        // Each comparison is false for NaN, so NaN is refused too.
+        let stall_is_a_fraction = self.cpu_stall_ceiling > 0.0 && self.cpu_stall_ceiling <= 1.0;
+        if !stall_is_a_fraction {
+            return Err(ConfigError::CpuCeiling("cpu_stall_ceiling"));
+        }
+        let runnable_is_positive = self.cpu_runnable_ceiling > 0.0;
+        if !runnable_is_positive {
+            return Err(ConfigError::CpuCeiling("cpu_runnable_ceiling"));
+        }
         Ok(())
     }
 
@@ -91,6 +100,9 @@ pub enum ConfigError {
     KillSamples(&'static str),
     /// The memory thresholds must rise: `mem_critical` < `kill_floor` < `mem_floor`.
     MemoryThresholds,
+    /// A CPU ceiling that can never be crossed, or always is: a stall ceiling outside (0, 1], or a
+    /// runnable ceiling that isn't positive (MT-033).
+    CpuCeiling(&'static str),
 }
 
 /// The least a ticket of each class reserves, whatever it asks for.
@@ -161,6 +173,48 @@ mod tests {
     #[test]
     fn a_sensible_config_is_valid() {
         assert_eq!(valid().validate(), Ok(()));
+    }
+
+    // MT-033: a stall ceiling is a fraction, so one past 1 could never be crossed and would turn the
+    // CPU limit off without a word.
+    #[test]
+    fn a_stall_ceiling_outside_zero_to_one_is_refused() {
+        for ceiling in [0.0, 1.01, -0.5, f64::NAN] {
+            let config = Config {
+                cpu_stall_ceiling: ceiling,
+                ..valid()
+            };
+            assert_eq!(
+                config.validate(),
+                Err(ConfigError::CpuCeiling("cpu_stall_ceiling")),
+                "{ceiling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stall_ceiling_of_exactly_one_is_allowed() {
+        let config = Config {
+            cpu_stall_ceiling: 1.0,
+            ..valid()
+        };
+
+        assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_runnable_ceiling_that_isnt_positive_is_refused() {
+        for ceiling in [0.0, -1.0, f64::NAN] {
+            let config = Config {
+                cpu_runnable_ceiling: ceiling,
+                ..valid()
+            };
+            assert_eq!(
+                config.validate(),
+                Err(ConfigError::CpuCeiling("cpu_runnable_ceiling")),
+                "{ceiling}"
+            );
+        }
     }
 
     #[test]
