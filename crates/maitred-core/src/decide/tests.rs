@@ -210,10 +210,12 @@ fn with_no_load_file_a_charged_orphan_does_not_keep_everyone_out() {
 }
 
 #[test]
-fn with_no_load_file_nobody_counts_as_stalled() {
-    let mut stuck = ticket("stuck", 1, Class::Light, State::Waiting);
-    stuck.last_pass = BootTime(NOW.0 - 3_600_000);
-    let mut snap = snapshot(vec![stuck, ticket("me", 2, Class::Light, State::Waiting)]);
+fn with_no_load_file_a_waiter_past_the_normal_stall_limit_still_holds_the_line() {
+    // The fallback's limit is three stall limits (MT-039), so after a wake a waiter that hasn't
+    // passed yet keeps its place.
+    let mut waking = ticket("waking", 1, Class::Light, State::Waiting);
+    waking.last_pass = BootTime(NOW.0 - 10_001);
+    let mut snap = snapshot(vec![waking, ticket("me", 2, Class::Light, State::Waiting)]);
     snap.load = None;
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
@@ -1795,4 +1797,33 @@ fn a_slot_both_named_and_held_outside_counts_once() {
     snap.held_outside.insert(pool, [1].into());
 
     assert_eq!(decide(&snap, &me()), admitted());
+}
+
+// MT-039 (Nick, 2026-10-16): with no reliable load, a waiter silent for 3 x the stall limit is
+// stalled. After a wake every live supervisor passes within a poll interval, well inside it.
+
+#[test]
+fn with_no_load_file_a_head_silent_past_three_stall_limits_does_not_hold_the_line() {
+    let mut stuck = ticket("stuck", 1, Class::Light, State::Waiting);
+    stuck.last_pass = BootTime(NOW.0 - 30_001);
+    let mut snap = snapshot(vec![stuck, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load = None;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn with_no_load_file_a_head_silent_for_exactly_three_stall_limits_still_holds_the_line() {
+    let mut slow = ticket("slow", 1, Class::Light, State::Waiting);
+    slow.last_pass = BootTime(NOW.0 - 30_000);
+    let mut snap = snapshot(vec![slow, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load = None;
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
 }

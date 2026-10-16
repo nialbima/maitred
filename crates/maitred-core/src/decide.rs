@@ -122,7 +122,7 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
     }
 
     let mut walk = Walk::new(snap, &load, &charged);
-    for t in waiting(snap, true) {
+    for t in waiting(snap, snap.config.stall_limit_ms()) {
         let is_me = &t.id == me;
         let allowed = walk.allowed(t);
         let held = match allowed.clone().and_then(|()| walk.fits(t)) {
@@ -198,7 +198,9 @@ fn fallback(snap: &Snapshot, mine: &Ticket, me: &TicketId, charged: &[&Ticket]) 
     }
     // First in line among those the fallback could admit: a quiet ticket not yet due, or one whose
     // slot isn't free, doesn't hold the line for anyone else.
-    let first = waiting(snap, false)
+    // A waiter silent for three stall limits is stalled even here (MT-039): after a wake every
+    // live supervisor passes within a poll interval, well inside it.
+    let first = waiting(snap, snap.config.stall_limit_ms().saturating_mul(3))
         .into_iter()
         .filter(|t| t.class != Class::Quiet || due_quiet(&snap.config, t))
         .find(|t| slots_free(snap, t, &BTreeMap::new()).is_ok())
@@ -231,9 +233,9 @@ fn is_charged(t: &Ticket) -> bool {
     }
 }
 
-/// Living waiting tickets by `(position, id)`, without the stalled ones when `skip_stalled`.
-fn waiting(snap: &Snapshot, skip_stalled: bool) -> Vec<&Ticket> {
-    let limit = snap.config.stall_limit_ms();
+/// Living waiting tickets by `(position, id)`, without those whose last pass is older than
+/// `limit`.
+fn waiting(snap: &Snapshot, limit: u64) -> Vec<&Ticket> {
     // Nobody is judged stalled until the stall limit has passed since the machine last woke.
     let woke_recently = snap
         .load
@@ -244,7 +246,7 @@ fn waiting(snap: &Snapshot, skip_stalled: bool) -> Vec<&Ticket> {
         .tickets
         .iter()
         .filter(|t| t.is_living() && t.state == State::Waiting)
-        .filter(|t| !skip_stalled || woke_recently || snap.now.since(t.last_pass) <= limit)
+        .filter(|t| woke_recently || snap.now.since(t.last_pass) <= limit)
         .collect();
     // By position, then id: `(seq, 0)` unless an administrator moved the ticket.
     let position = |t: &Ticket| {
