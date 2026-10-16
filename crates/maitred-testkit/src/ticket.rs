@@ -11,6 +11,9 @@ pub const HEADER: usize = 96;
 /// The most payload a slot holds.
 pub const MAX_PAYLOAD: usize = 4000;
 const MAGIC: &[u8; 8] = b"MTRDTICK";
+/// The major version this reader understands. A ticket of a newer major reads as unknown (ARCHITECTURE.md,
+/// Versions: Nick's decision on MT-011); a newer minor is still read from its header.
+pub const MAJOR: u8 = 4;
 
 /// A slot's fixed header, field by field as the doc lists them, with the codes as stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,7 +225,8 @@ pub fn encode_slot(header: &Header, payload: &str) -> [u8; SLOT] {
 
 /// Reads a whole ticket file as the doc says: keep the slots that pass, take the higher generation. With two valid
 /// slots of one generation, which no correct writer leaves, the second is read. The doc's "read again, up to
-/// three times" is the caller's: this reads the bytes it is given once.
+/// three times" is the caller's: this reads the bytes it is given once. If the newest valid slot is of a newer
+/// major version, the ticket is unknown.
 #[must_use]
 pub fn read_ticket(bytes: &[u8]) -> Read {
     if bytes.len() != 2 * SLOT {
@@ -234,6 +238,7 @@ pub fn read_ticket(bytes: &[u8]) -> Read {
         .iter()
         .filter_map(|slot| decode_slot(slot).ok())
         .max_by_key(|(header, _)| header.generation)
+        .filter(|(header, _)| header.major <= MAJOR)
         .map_or(Read::Unknown, |(header, payload)| Read::Valid {
             header,
             payload,

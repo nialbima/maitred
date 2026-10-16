@@ -365,3 +365,29 @@ fn outcome_entries_are_judged_by_their_times_not_the_order_they_were_reported() 
 
     assert_eq!(scenario.judge(&outcome), Ok(()));
 }
+
+#[test]
+fn a_record_carrying_the_expected_flag_passes() {
+    let scenario = two_heavy_jobs().expect(Expect::record_flag("a", "tainted"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .flagged("a", "tainted");
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn a_record_missing_the_expected_flag_fails() {
+    let scenario = two_heavy_jobs().expect(Expect::record_flag("a", "tainted"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .flagged("a", "edited-classes");
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::NoRecordFlag {
+            label: "a".into(),
+            flag: "tainted".into()
+        }])
+    );
+}

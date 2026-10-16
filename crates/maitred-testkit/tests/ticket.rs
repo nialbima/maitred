@@ -311,3 +311,31 @@ fn each_known_code_reads_as_itself_and_says_it_is_known() {
         .codes_known()
     );
 }
+
+#[test]
+fn a_ticket_of_a_newer_major_version_reads_as_unknown() {
+    let newer = encode_slot(
+        &Header {
+            major: 5,
+            ..header(2)
+        },
+        "{}",
+    );
+    let older = encode_slot(&header(1), "{}");
+
+    assert_eq!(read_ticket(&file(&older, &newer)), Read::Unknown);
+}
+
+#[test]
+fn a_ticket_of_a_newer_minor_version_is_read_from_its_header() {
+    let newer = encode_slot(
+        &Header {
+            minor: 9,
+            ..header(2)
+        },
+        "{}",
+    );
+    let older = encode_slot(&header(1), "{}");
+
+    assert_eq!(read_ticket(&file(&older, &newer)).generation(), Some(2));
+}

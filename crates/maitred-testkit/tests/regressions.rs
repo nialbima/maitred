@@ -59,7 +59,11 @@ fn checked_in_phase_1() -> Vec<String> {
 #[test]
 fn every_finding_a_scenario_checks_is_a_scenario_line_in_the_findings_list() {
     let lines: Vec<_> = finding_lines().collect();
-    for finding in checked_in_phase_1() {
+    // A scenario may check a decision tracked in triage (MT-nnn) rather than a review finding.
+    for finding in checked_in_phase_1()
+        .into_iter()
+        .filter(|id| !id.starts_with("MT-"))
+    {
         let disposition = lines.iter().find(|(id, _)| *id == finding).map_or_else(
             || panic!("{finding} isn't in FINDINGS.md"),
             |(_, disposition)| *disposition,

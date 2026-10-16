@@ -32,6 +32,8 @@ pub struct Outcome {
     pub kills: Vec<(String, Trigger, Ms)>,
     /// How each run ended, and when.
     pub ends: Vec<(String, End, Ms)>,
+    /// Each record's flags, such as `tainted`.
+    pub flags: Vec<(String, String)>,
 }
 
 impl Outcome {
@@ -60,6 +62,17 @@ impl Outcome {
     pub fn ended_at(mut self, label: &str, end: End, at: Ms) -> Self {
         self.ends.push((label.into(), end, at));
         self
+    }
+
+    /// Records that `label`'s record carries `flag`.
+    #[must_use]
+    pub fn flagged(mut self, label: &str, flag: &str) -> Self {
+        self.flags.push((label.into(), flag.into()));
+        self
+    }
+
+    pub(crate) fn has_flag(&self, label: &str, flag: &str) -> bool {
+        self.flags.iter().any(|(l, f)| l == label && f == flag)
     }
 
     /// When `label` was first admitted.

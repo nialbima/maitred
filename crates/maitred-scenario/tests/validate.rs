@@ -233,3 +233,28 @@ fn a_run_that_stops_before_its_last_event_is_refused() {
         }])
     );
 }
+
+#[test]
+fn a_sampler_outage_is_accepted_open_ended_or_with_an_end_after_its_start() {
+    let scenario = Scenario::new("the sampler stops", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .sampler_down(ms(0), None)
+        .sampler_down(ms(5_000), Some(ms(6_000)));
+
+    assert_eq!(scenario.validate(), Ok(()));
+}
+
+#[test]
+fn a_sampler_outage_that_ends_before_it_starts_is_refused() {
+    let scenario = Scenario::new("an outage backwards", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .sampler_down(ms(5_000), Some(ms(1_000)));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::OutageEndsBeforeItStarts {
+            at: ms(5_000),
+            until: ms(1_000)
+        }])
+    );
+}

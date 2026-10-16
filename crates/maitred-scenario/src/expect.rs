@@ -27,6 +27,8 @@ pub enum Expect {
     NotKilled(String),
     /// No more than `allowed` victims are chosen for `trigger` in the whole run.
     AtMostKills { trigger: Trigger, allowed: usize },
+    /// The job's record carries this flag, such as `tainted`.
+    RecordFlag { label: String, flag: String },
     /// The job's record says it ended this way.
     Ends { label: String, end: End },
 }
@@ -55,6 +57,10 @@ pub enum Failure {
         label: String,
         before: Ms,
         at: Ms,
+    },
+    NoRecordFlag {
+        label: String,
+        flag: String,
     },
     TooManyTogether {
         allowed: usize,
@@ -128,6 +134,14 @@ impl Expect {
     }
 
     #[must_use]
+    pub fn record_flag(label: &str, flag: &str) -> Self {
+        Self::RecordFlag {
+            label: label.into(),
+            flag: flag.into(),
+        }
+    }
+
+    #[must_use]
     pub fn never_admitted(label: &str) -> Self {
         Self::NeverAdmitted(label.into())
     }
@@ -170,7 +184,8 @@ impl Expect {
             | Self::NeverAdmitted(label)
             | Self::NotKilled(label)
             | Self::Killed { label, .. }
-            | Self::Ends { label, .. } => vec![label],
+            | Self::Ends { label, .. }
+            | Self::RecordFlag { label, .. } => vec![label],
             Self::AtMostTogether { labels, .. } => labels.iter().map(String::as_str).collect(),
             Self::AtMostKills { .. } => vec![],
         }
@@ -232,6 +247,12 @@ impl Expect {
                     before: *before,
                     at,
                 }),
+            Self::RecordFlag { label, flag } => {
+                (!outcome.has_flag(label, flag)).then(|| Failure::NoRecordFlag {
+                    label: label.clone(),
+                    flag: flag.clone(),
+                })
+            }
             Self::NeverAdmitted(label) => outcome
                 .admitted_at(label)
                 .map(|_| Failure::Admitted(label.clone())),

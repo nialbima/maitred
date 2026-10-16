@@ -27,6 +27,8 @@ pub fn admission() -> Vec<Scenario> {
         nobody_jumps_the_queue_after_the_machine_wakes(),
         class_blocked_ticket_doesnt_drain_when_its_hold_lapses(),
         unreadable_ticket_doesnt_stop_the_fallback_for_good(),
+        with_no_reliable_load_a_quiet_job_not_yet_due_neither_starts_nor_holds_the_line(),
+        with_the_sampler_down_a_due_quiet_job_gets_in_tainted(),
     ]
 }
 
@@ -369,6 +371,44 @@ fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
     .expect(Expect::admitted_before("b", "c"))
     .expect(Expect::never_together("a", "b"))
     .expect(Expect::never_together("b", "c"))
+}
+
+/// Nick's decision on MT-024 (ARCHITECTURE rev 124): with no reliable load, "if I am quiet and not due ...
+/// wait(quiet needs idle)", and the fallback admits the first in waiting "skipping quiet tickets not yet due".
+/// Outside CPU load keeps the quiet streak at 0, so `q` isn't allowed before it is due. The machine sleeps from 1 s to
+/// 5 s, and the sampler stays down until 8 s, so the load is unreliable from the wake on. `l` arrives as the machine
+/// wakes: the fallback skips `q` and admits `l` at once. If it didn't skip `q`, `l` would wait for the load to come
+/// back at 8 s. `q` is due after 5 s awake (1 s before the sleep and 4 s after), at 9 s, and doesn't start before.
+fn with_no_reliable_load_a_quiet_job_not_yet_due_neither_starts_nor_holds_the_line() -> Scenario {
+    Scenario::new(
+        "with no reliable load, a quiet job not yet due neither starts nor holds up the fallback",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-024")
+    .load(Sample::at(ms(0)).background(4_000, 0))
+    .arrive(ms(0), Job::new("q", Class::Quiet))
+    .sleep(ms(1_000), ms(5_000))
+    .sampler_down(ms(5_000), Some(ms(8_000)))
+    .arrive(ms(5_000), Job::new("l", Class::Light))
+    .expect(Expect::admitted_by("l", secs(6)))
+    .expect(Expect::not_admitted_before("q", secs(9)))
+}
+
+/// Nick's decision on MT-024: the sampler is down from the start, so there is never a load file. `q` (quiet) isn't
+/// due until it has waited `quiet_max_wait` (5 s), and until then it waits. Once due, with nothing charged, the
+/// fallback admits it, and having got in without the quiet streak, its record is marked `tainted`.
+fn with_the_sampler_down_a_due_quiet_job_gets_in_tainted() -> Scenario {
+    Scenario::new(
+        "with the sampler down, a quiet job gets in once due, tainted, and not before",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-024")
+    .sampler_down(ms(0), None)
+    .arrive(ms(0), Job::new("q", Class::Quiet).runs_for(secs(1)))
+    .expect(Expect::not_admitted_before("q", secs(5)))
+    .expect(Expect::admitted_by("q", secs(6)))
+    .expect(Expect::record_flag("q", "tainted"))
+    .run_until(secs(8))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

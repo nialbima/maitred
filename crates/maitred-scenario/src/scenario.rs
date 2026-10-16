@@ -21,6 +21,9 @@ pub enum Event {
     /// only time awake. On waking, maitred's processes resume in an order the seed chooses, and the first sample
     /// after waking carries `woke_at`.
     Sleep { wakes_at: Ms },
+    /// The sampler stops, so no load file is published, until `until` (or to the end of the run). The last file
+    /// published goes stale.
+    SamplerDown { until: Option<Ms> },
 }
 
 /// A reason a scenario can't be run as written.
@@ -38,6 +41,8 @@ pub enum Invalid {
     CantFail { allowed: usize, jobs: usize },
     /// The run stops before its last event.
     StopsBeforeLastEvent { until: Ms, last: Ms },
+    /// A sampler outage ends no later than it starts.
+    OutageEndsBeforeItStarts { at: Ms, until: Ms },
     /// A sleep wakes no later than it starts.
     SleepEndsBeforeItStarts { at: Ms, wakes_at: Ms },
     /// A strict order is expected between two jobs that arrive less than a poll interval apart, which
@@ -117,6 +122,12 @@ impl Scenario {
         self
     }
 
+    /// The sampler stops at `at`, until `until` or for the rest of the run.
+    #[must_use]
+    pub fn sampler_down(self, at: Ms, until: Option<Ms>) -> Self {
+        self.at(at, Event::SamplerDown { until })
+    }
+
     /// The machine sleeps from `at` until `wakes_at`.
     #[must_use]
     pub fn sleep(self, at: Ms, wakes_at: Ms) -> Self {
@@ -145,7 +156,7 @@ impl Scenario {
     pub fn arrivals(&self) -> impl Iterator<Item = (Ms, &Job)> {
         self.events.iter().filter_map(|(at, event)| match event {
             Event::Arrive(job) => Some((*at, job)),
-            Event::Fault(_) | Event::Sleep { .. } => None,
+            Event::Fault(_) | Event::Sleep { .. } | Event::SamplerDown { .. } => None,
         })
     }
 
@@ -177,6 +188,14 @@ impl Scenario {
             }
         }
         for (at, event) in &self.events {
+            if let Event::SamplerDown { until: Some(until) } = event
+                && until <= at
+            {
+                problems.push(Invalid::OutageEndsBeforeItStarts {
+                    at: *at,
+                    until: *until,
+                });
+            }
             if let Event::Sleep { wakes_at } = event
                 && wakes_at <= at
             {
