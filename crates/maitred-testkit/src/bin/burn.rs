@@ -448,7 +448,7 @@ fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: O
             ids.join(",")
         }
     );
-    fs::write(path, text).expect("burn: can't write the ready file");
+    write_whole(path, &text, "the ready file");
 }
 
 #[expect(
@@ -487,7 +487,7 @@ fn main() -> ExitCode {
     handle(libc::SIGTERM, args.on_term);
     handle(libc::SIGINT, args.on_int);
     if let Some(path) = &args.armed {
-        fs::write(path, "armed\n").expect("burn: can't write the armed file");
+        write_whole(path, "armed\n", "the armed file");
     }
     let started = Instant::now();
     let (children, mut orphan, daemon) = start_children(&args);
@@ -542,8 +542,7 @@ fn main() -> ExitCode {
     reap();
     let orphan = orphan.as_ref().map(Child::id);
     if let Some(path) = &args.report {
-        fs::write(path, report(&args, port, &child_ids, orphan))
-            .expect("burn: can't write the report");
+        write_whole(path, &report(&args, port, &child_ids, orphan), "the report");
     }
     drop(black_box(memory));
     if EXIT_REQUESTED.load(Ordering::SeqCst) {
@@ -570,4 +569,13 @@ impl Args {
     fn label_line(&self) -> String {
         format!("burn {}", self.label)
     }
+}
+
+/// Writes `text` to `path` whole: to a temporary name beside it, then renamed into place, so a test that waits for
+/// the file to appear never reads it half written.
+fn write_whole(path: &str, text: &str, what: &str) {
+    let partial = format!("{path}.part-{}", std::process::id());
+    fs::write(&partial, text)
+        .and_then(|()| fs::rename(&partial, path))
+        .unwrap_or_else(|error| panic!("burn: can't write {what}: {error}"));
 }
