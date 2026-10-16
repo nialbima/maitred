@@ -30,7 +30,8 @@ pub enum End {
 pub struct Outcome {
     pub admissions: Vec<(String, Ms)>,
     pub kills: Vec<(String, Trigger, Ms)>,
-    pub ends: Vec<(String, End)>,
+    /// How each run ended, and when, if the target knows.
+    pub ends: Vec<(String, End, Option<Ms>)>,
 }
 
 impl Outcome {
@@ -57,7 +58,14 @@ impl Outcome {
     /// Records how `label`'s run ended.
     #[must_use]
     pub fn ended(mut self, label: &str, end: End) -> Self {
-        self.ends.push((label.into(), end));
+        self.ends.push((label.into(), end, None));
+        self
+    }
+
+    /// Records how `label`'s run ended, and when.
+    #[must_use]
+    pub fn ended_at(mut self, label: &str, end: End, at: Ms) -> Self {
+        self.ends.push((label.into(), end, Some(at)));
         self
     }
 
@@ -71,7 +79,19 @@ impl Outcome {
     pub(crate) fn end_of(&self, label: &str) -> Option<&End> {
         self.ends
             .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, end)| end)
+            .find(|(l, _, _)| l == label)
+            .map(|(_, end, _)| end)
+    }
+
+    /// When `label` was running: from its admission to its end, or to the end of the run if it never ended.
+    /// `None` if it was never admitted.
+    pub(crate) fn run_of(&self, label: &str) -> Option<(Ms, Option<Ms>)> {
+        let start = self.admitted_at(label)?;
+        let end = self
+            .ends
+            .iter()
+            .find(|(l, _, _)| l == label)
+            .and_then(|(_, _, at)| *at);
+        Some((start, end))
     }
 }

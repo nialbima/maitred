@@ -1,7 +1,7 @@
 //! Both targets publish the same load file from a scenario: the trace's background load plus each running
 //! job's declared use (ARCHITECTURE.md, Test kit: Load).
 
-use maitred_scenario::{Amount, MachineConfig, Publisher, Reading, Sample, ms};
+use maitred_scenario::{Amount, MachineConfig, Publisher, Reading, Running, Sample, ms};
 
 fn machine() -> MachineConfig {
     // 8 cores, 16 GB; quiet under 100 thousandths of a runnable task per core; CPU kill over 4 per core.
@@ -22,7 +22,10 @@ fn running_jobs_add_their_use_to_the_background_load() {
 
     let load_file = publisher.publish(
         &sample,
-        &[("a", job(2_000, 1_024)), ("b", job(500, 512))],
+        &[
+            Running::measured("a", job(2_000, 1_024)),
+            Running::measured("b", job(500, 512)),
+        ],
         None,
     );
 
@@ -35,7 +38,7 @@ fn cpu_used_stops_at_capacity_and_the_excess_shows_as_pressure() {
     let mut publisher = Publisher::new(&machine());
     let sample = Sample::at(ms(200)).background(12_000, 0);
 
-    let load_file = publisher.publish(&sample, &[("a", job(4_000, 0))], None);
+    let load_file = publisher.publish(&sample, &[Running::measured("a", job(4_000, 0))], None);
 
     assert_eq!(load_file.cpu_used_millicores, 8_000);
     // 16 cores of demand on 8 cores is 2 runnable tasks per core.
@@ -47,7 +50,7 @@ fn available_memory_never_goes_below_zero() {
     let mut publisher = Publisher::new(&machine());
     let sample = Sample::at(ms(200)).background(0, 16_000);
 
-    let load_file = publisher.publish(&sample, &[("a", job(0, 4_096))], None);
+    let load_file = publisher.publish(&sample, &[Running::measured("a", job(0, 4_096))], None);
 
     assert_eq!(load_file.mem_available_mb, 0);
 }
@@ -56,7 +59,11 @@ fn available_memory_never_goes_below_zero() {
 fn each_running_job_is_listed_with_its_declared_use() {
     let mut publisher = Publisher::new(&machine());
 
-    let load_file = publisher.publish(&Sample::at(ms(200)), &[("a", job(2_000, 1_024))], None);
+    let load_file = publisher.publish(
+        &Sample::at(ms(200)),
+        &[Running::measured("a", job(2_000, 1_024))],
+        None,
+    );
 
     assert_eq!(load_file.jobs, vec![("a".to_string(), job(2_000, 1_024))]);
 }
@@ -137,4 +144,19 @@ fn a_reading_the_sample_marks_missing_is_published_as_missing() {
     let load_file = publisher.publish(&Sample::at(ms(200)).missing(Reading::Memory), &[], None);
 
     assert_eq!(load_file.missing, vec![Reading::Memory]);
+}
+
+#[test]
+fn a_job_whose_use_cant_be_measured_loads_the_machine_but_isnt_listed() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(
+        &Sample::at(ms(200)),
+        &[Running::unmeasured("a", job(2_000, 1_024))],
+        None,
+    );
+
+    assert_eq!(load_file.cpu_used_millicores, 2_000);
+    assert_eq!(load_file.mem_available_mb, 16_384 - 1_024);
+    assert_eq!(load_file.jobs, vec![]);
 }

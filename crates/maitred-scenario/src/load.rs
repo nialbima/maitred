@@ -77,6 +77,37 @@ impl Sample {
     }
 }
 
+/// A job running when a sample is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Running<'a> {
+    pub label: &'a str,
+    /// What it uses; it loads the machine whether or not it is measured.
+    pub uses: Amount,
+    /// Whether its holder's figure reaches the sample. An unmeasured job counts in the machine's figures but
+    /// isn't listed under `jobs`, so admission charges it its whole reservation.
+    pub measured: bool,
+}
+
+impl<'a> Running<'a> {
+    #[must_use]
+    pub fn measured(label: &'a str, uses: Amount) -> Self {
+        Self {
+            label,
+            uses,
+            measured: true,
+        }
+    }
+
+    #[must_use]
+    pub fn unmeasured(label: &'a str, uses: Amount) -> Self {
+        Self {
+            label,
+            uses,
+            measured: false,
+        }
+    }
+}
+
 /// What `load/now.json` says after one sample, in the scenario's units.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Published {
@@ -135,11 +166,11 @@ impl Publisher {
     pub fn publish(
         &mut self,
         sample: &Sample,
-        running: &[(&str, Amount)],
+        running: &[Running<'_>],
         victim_gone: Option<Ms>,
     ) -> Published {
-        let job_cpu: u32 = running.iter().map(|(_, used)| used.cpu_millicores).sum();
-        let job_mem: u32 = running.iter().map(|(_, used)| used.mem_mb).sum();
+        let job_cpu: u32 = running.iter().map(|job| job.uses.cpu_millicores).sum();
+        let job_mem: u32 = running.iter().map(|job| job.uses.mem_mb).sum();
         let demand = sample.cpu_demand_millicores + job_cpu;
         let pressure = permille(demand, self.capacity.cpu_millicores);
         let woke = sample.woke_at.is_some();
@@ -182,7 +213,8 @@ impl Publisher {
             over_gpu_streak: self.over_gpu_streak,
             jobs: running
                 .iter()
-                .map(|(label, used)| ((*label).to_string(), *used))
+                .filter(|job| job.measured)
+                .map(|job| (job.label.to_string(), job.uses))
                 .collect(),
             missing: sample.missing.clone(),
         }

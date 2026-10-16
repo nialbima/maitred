@@ -8,8 +8,12 @@ use crate::outcome::{End, Outcome, Trigger};
 pub enum Expect {
     /// `first` is admitted, and `second` is not admitted before it.
     AdmittedBefore { first: String, second: String },
+    /// The job is admitted at some point in the run.
+    Admitted(String),
     /// The job is never admitted.
     NeverAdmitted(String),
+    /// The two jobs are never running at the same moment.
+    NeverTogether { first: String, second: String },
     /// The job is chosen as a victim for `trigger`.
     Killed { label: String, trigger: Trigger },
     /// The job is never chosen as a victim.
@@ -27,7 +31,12 @@ pub enum Failure {
         first: String,
         second: String,
     },
+    NotAdmitted(String),
     Admitted(String),
+    RanTogether {
+        first: String,
+        second: String,
+    },
     NotKilled {
         label: String,
         trigger: Trigger,
@@ -49,6 +58,19 @@ impl Expect {
     #[must_use]
     pub fn admitted_before(first: &str, second: &str) -> Self {
         Self::AdmittedBefore {
+            first: first.into(),
+            second: second.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn admitted(label: &str) -> Self {
+        Self::Admitted(label.into())
+    }
+
+    #[must_use]
+    pub fn never_together(first: &str, second: &str) -> Self {
+        Self::NeverTogether {
             first: first.into(),
             second: second.into(),
         }
@@ -88,8 +110,11 @@ impl Expect {
     /// The jobs this expectation names.
     pub(crate) fn labels(&self) -> Vec<&str> {
         match self {
-            Self::AdmittedBefore { first, second } => vec![first, second],
-            Self::NeverAdmitted(label)
+            Self::AdmittedBefore { first, second } | Self::NeverTogether { first, second } => {
+                vec![first, second]
+            }
+            Self::Admitted(label)
+            | Self::NeverAdmitted(label)
             | Self::NotKilled(label)
             | Self::Killed { label, .. }
             | Self::Ends { label, .. } => vec![label],
@@ -107,6 +132,24 @@ impl Expect {
                     (None, _) => false,
                 };
                 (!held).then(|| Failure::NotBefore {
+                    first: first.clone(),
+                    second: second.clone(),
+                })
+            }
+            Self::Admitted(label) => outcome
+                .admitted_at(label)
+                .is_none()
+                .then(|| Failure::NotAdmitted(label.clone())),
+            Self::NeverTogether { first, second } => {
+                // A run lasts from its admission to its end, or to the end of the run if it never ended.
+                let overlap = match (outcome.run_of(first), outcome.run_of(second)) {
+                    (Some((a_start, a_end)), Some((b_start, b_end))) => {
+                        a_end.is_none_or(|end| b_start < end)
+                            && b_end.is_none_or(|end| a_start < end)
+                    }
+                    _ => false,
+                };
+                overlap.then(|| Failure::RanTogether {
                     first: first.clone(),
                     second: second.clone(),
                 })

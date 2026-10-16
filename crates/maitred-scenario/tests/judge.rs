@@ -154,3 +154,66 @@ fn a_job_with_no_record_fails_an_end_expectation() {
         }])
     );
 }
+
+#[test]
+fn a_job_expected_to_start_that_did_passes() {
+    let scenario = two_heavy_jobs().expect(Expect::admitted("b"));
+    let outcome = Outcome::new().admitted("b", ms(9_000));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn a_job_expected_to_start_that_never_did_fails() {
+    let scenario = two_heavy_jobs().expect(Expect::admitted("b"));
+    let outcome = Outcome::new().admitted("a", ms(100));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::NotAdmitted("b".into())])
+    );
+}
+
+#[test]
+fn two_jobs_that_ran_one_after_the_other_never_ran_together() {
+    let scenario = two_heavy_jobs().expect(Expect::never_together("a", "b"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .ended_at("a", End::Completed { status: 0 }, ms(5_000))
+        .admitted("b", ms(5_200));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn two_jobs_whose_runs_overlapped_ran_together() {
+    let scenario = two_heavy_jobs().expect(Expect::never_together("a", "b"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .admitted("b", ms(5_200))
+        .ended_at("a", End::Completed { status: 0 }, ms(6_000));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::RanTogether {
+            first: "a".into(),
+            second: "b".into()
+        }])
+    );
+}
+
+#[test]
+fn a_job_still_running_at_the_end_of_the_run_overlaps_anything_admitted_after_it() {
+    let scenario = two_heavy_jobs().expect(Expect::never_together("a", "b"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .admitted("b", ms(5_200));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::RanTogether {
+            first: "a".into(),
+            second: "b".into()
+        }])
+    );
+}

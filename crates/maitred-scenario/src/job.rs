@@ -27,6 +27,8 @@ pub struct Job {
     pub runs_for: Ms,
     /// The status it exits with when it finishes on its own.
     pub exit_status: u8,
+    /// Whether its holder's measurement reaches the sample (see [`crate::Running`]).
+    pub measured: bool,
 }
 
 impl Job {
@@ -44,6 +46,7 @@ impl Job {
             },
             runs_for: secs(1),
             exit_status: 0,
+            measured: true,
         }
     }
 
@@ -78,6 +81,13 @@ impl Job {
     #[must_use]
     pub fn runs_for(mut self, span: Ms) -> Self {
         self.runs_for = span;
+        self
+    }
+
+    /// Makes its use unmeasurable: it still loads the machine, but no figure for it reaches the sample.
+    #[must_use]
+    pub fn unmeasured(mut self) -> Self {
+        self.measured = false;
         self
     }
 
