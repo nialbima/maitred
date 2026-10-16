@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 145, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 148, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -246,7 +246,7 @@ if any ticket's recreated_at is recent:
     wait(tickets being recreated)
 if load is stale, or a critical reading (cpu, memory) is missing:
     if I am quiet and not due (past quiet_max_wait): wait(quiet needs idle)   # no load figures, most often a wake, is no time for a benchmark
-    admit me only if no living ticket is charged and I am first in waiting, skipping quiet tickets not yet due and tickets whose slots aren't free   # a due quiet ticket gets in tainted      # plain-lock fallback; nobody counts as stalled
+    admit me only if no living ticket is charged and I am first in waiting, skipping quiet tickets not yet due and tickets whose slots aren't free   # a due quiet ticket gets in tainted      # plain-lock fallback; stalled means no pass for 3 stall limits
     else wait(no reliable load)
 if mem_available < mem_floor or cpu_pressure > cpu_ceiling or gpu_used > gpu_ceiling:
     wait(live limits)
@@ -284,7 +284,7 @@ wait(the first rule that held me)
 | due quiet | past `quiet_max_wait`, a quiet ticket stops the walk so the machine drains for it, until it gets in. Draining is what gives a job that needs an idle machine its empty queue under steady traffic; what draining can't remove (load from outside maitred) is why it then runs tainted. Like first-in, it never waives memory |
 | fits once drained | `reserve(t)`'s memory is at most `mem_available` plus what each living charged ticket holds (its measured use, or its whole reservation when unmeasured): the most a drain can free, since a drain waits only for living jobs and an orphan may run on; and every pool it asks of is declared and has a slot that no orphan or other non-living ticket names, since a drain can't free those either. A ticket past that would wait at the head of a drained queue for ever, so it doesn't drain |
 | first in | when no living ticket is charged, the first ticket that its class allows gets in even if its cores exceed the budget. It never waives memory (over-committing memory is what takes a machine down, so a job whose memory doesn't fit waits for memory to come free, however long), a slot, a class rule or the live limits. A charged orphan doesn't count: its load is in the sample, and an orphan that never ends must not keep every large job out for ever. The plain-lock fallback ignores a charged orphan for the same reason, though without load figures nothing sees what it uses |
-| stalled | a waiting ticket whose `last_pass` is older than 5 poll intervals: its supervisor is stopped or stuck, so it neither takes budget nor blocks anyone; it is admitted again when it next runs a pass. Nobody is judged stalled while the load file is stale, or until the stall limit has passed since the machine last woke (`woke_at`), so after a sleep nobody jumps the queue while the others are still waking |
+| stalled | a waiting ticket whose `last_pass` is older than 5 poll intervals: its supervisor is stopped or stuck, so it neither takes budget nor blocks anyone; it is admitted again when it next runs a pass. Without reliable load the limit is three times as long, since there's no woke_at to wait out: after a wake every live supervisor passes within a poll interval, well inside it, so nobody jumps the queue, and a stopped head still can't block the fallback for ever. Otherwise nobody is judged stalled until the stall limit has passed since the machine last woke (`woke_at`), so after a sleep nobody jumps the queue while the others are still waking |
 | orphan charge | a running orphan whose holder is alive is charged its reservation, but its class's barrier doesn't apply: an orphaned quiet job doesn't stop the queue, and `status` says why it is charged |
 | ties | equal `admitted_at` (recency in the kill policy) or equal `seq` are broken by ticket id, so every reader orders them the same way |
 
@@ -684,6 +684,13 @@ Sleep is driven by the trace (`woke_at`, and a sample marked not fresh), not by 
 - Delete a ticket, a request directory, a stop marker or a use file underneath.
 - Hold `admit.lock` from outside.
 - Replace the binary.
+
+**The pause protocol** (agreed with the test kit's owner, 2026-10-16), in debug builds only:
+
+- `MAITRED_TEST_PAUSE=<path>` names the controller's Unix stream socket, and `MAITRED_TEST_PAUSE_AT=<point>,<point>,…` the points that block; an unlisted point costs a string compare and nothing else. A socket path is limited to about 104 bytes on macOS, so the controller listens under a short directory.
+- At a listed point the process connects, writes one line, `at <point> pid <pid> ticket <id>` (`-` before the ticket exists), and blocks reading one line. `go` continues. End-of-file or a failed connect continues too, with one `maitred: pause point <point>: controller gone` on stderr, so a dead controller never hangs a run. Each paused process holds its own connection, so many can wait at once.
+- maitred's own processes (supervisor, holder, drain) honour the two variables; the job's environment has them removed, so a nested `maitred` inside a job never pauses at points the scenario didn't ask for.
+- A point sits after the state it names is durable (after the write, the sync or the rename), so a KILL there leaves exactly that state; a point before a step is named for it (`ticket.before_sync`). The names are dotted, and this list is the one the test kit checks a scenario's points against: `admit.locked`, `admit.decided`, `ticket.written`, `ticket.synced`, `ticket.renamed`, `holder.parked`, `holder.forked`, `stop.marked`, `record.written`. Adding a point means adding it here.
 
 A pause point never makes a function return an error it didn't get: a fault that is faked tests a path that may not exist.
 
