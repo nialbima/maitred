@@ -32,6 +32,9 @@ pub enum Fault {
     },
     /// Deletes the job's ticket file underneath it.
     DeleteTicket { label: String },
+    /// Leaves neither of the ticket's slots valid (a bad checksum in each) until the owner next writes it, so
+    /// every other reader finds no valid slot meanwhile.
+    CorruptTicket { label: String },
     /// Deletes the job's request directory underneath it.
     DeleteRequestDir { label: String },
     /// Deletes the job's stop marker, if it has one.
@@ -55,6 +58,14 @@ impl Fault {
     #[must_use]
     pub fn delete_ticket(label: &str) -> Self {
         Self::DeleteTicket {
+            label: label.into(),
+        }
+    }
+
+    /// Corrupts both of the job's ticket slots.
+    #[must_use]
+    pub fn corrupt_ticket(label: &str) -> Self {
+        Self::CorruptTicket {
             label: label.into(),
         }
     }
@@ -90,6 +101,7 @@ impl Fault {
         match self {
             Self::Signal { label, .. }
             | Self::DeleteTicket { label }
+            | Self::CorruptTicket { label }
             | Self::DeleteRequestDir { label }
             | Self::DeleteStopMarker { label }
             | Self::Cancel { label, .. } => label,

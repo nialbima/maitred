@@ -170,7 +170,7 @@ r3-admission A15 | right after the machine wakes, a job is killed, or a job that
 r3-admission A16 | a job that needs a quiet machine, once it has waited long enough, blocks every job queued behind it for as long as some long-running or orphaned job is still using its reservation | scenario due_quiet_job_isnt_held_off_by_an_orphan sim phase 1
 r3-admission A17 | a large job that can never fit keeps its share of the machine set aside for ever, so nothing queued behind it starts | scenario job_that_can_never_fit_doesnt_hold_the_queue_for_ever sim phase 1
 r3-admission A18 | an older maitred undercharges a job queued by a newer one and cannot tell whether that job's waiting process is suspended | scenario older_reader_charges_newer_ticket_its_full_reservation_and_judges_its_stall real phase 2
-r3-admission A19 | with the load reading unavailable, no job ever starts because one queued job's file cannot be read by the others | scenario fallback_not_blocked_by_newer_version_or_unreadable_locked_ticket sim phase 1
+r3-admission A19 | with the load reading unavailable, no job ever starts because one queued job's file cannot be read by the others | scenario unreadable_ticket_doesnt_stop_the_fallback_for_good sim phase 1
 r3-admission A20 | after the queue's files are deleted and restored, a job queued later runs ahead of jobs queued before it, and different waiters disagree on the order | scenario queue_order_kept_after_ticket_files_deleted_and_restored real phase 6
 r3-admission A21 | while a running job's file is deleted, a second job is killed for the same breach, or new jobs start in the deleted job's reservation | scenario deleted_stop_marker_does_not_allow_second_victim real phase 8
 

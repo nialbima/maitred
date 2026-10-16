@@ -34,10 +34,7 @@ const FINDINGS: &str = include_str!("../FINDINGS.md");
 
 /// Phase 1 findings whose scenario can't be written yet, each with the reason. Remove one when its scenario
 /// lands; the test below fails if a finding here is already checked.
-const PENDING: &[(&str, &str)] = &[(
-    "r3-admission A19",
-    "needs a fault that corrupts a ticket, which waits on the ticket header's encoding (MT-018)",
-)];
+const PENDING: &[(&str, &str)] = &[];
 
 fn finding_lines() -> impl Iterator<Item = (String, &'static str)> {
     FINDINGS

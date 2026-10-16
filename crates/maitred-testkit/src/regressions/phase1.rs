@@ -26,6 +26,7 @@ pub fn admission() -> Vec<Scenario> {
         due_quiet_job_isnt_held_off_by_an_orphan(),
         nobody_jumps_the_queue_after_the_machine_wakes(),
         class_blocked_ticket_doesnt_drain_when_its_hold_lapses(),
+        unreadable_ticket_doesnt_stop_the_fallback_for_good(),
     ]
 }
 
@@ -325,6 +326,29 @@ fn class_blocked_ticket_doesnt_drain_when_its_hold_lapses() -> Scenario {
     .arrive(ms(7_000), Job::new("l", Class::Light))
     .expect(Expect::admitted_by("l", ms(8_000)))
     .expect(Expect::admitted_before("l", "h3"))
+}
+
+/// The sampler never reads memory, so admission is the plain-lock fallback: one job at a time, "admit me only if
+/// no living ticket is charged and I am first in waiting". `b` and `c` wait behind `a`. `b`'s ticket is corrupted
+/// while it waits: until `b`'s supervisor next writes it, other readers find no valid slot and charge it at the
+/// heavy minimum. That must not keep the queue stopped for good: `b`'s next pass rewrites the ticket, and `b`
+/// and then `c` start once `a` has ended.
+fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
+    Scenario::new(
+        "with no reliable load, an unreadable ticket doesn't stop the queue for good",
+        MachineConfig::for_tests(),
+    )
+    .checks("r3-admission A19")
+    .load(Sample::at(ms(0)).missing(Reading::Memory))
+    .arrive(ms(0), Job::new("a", Class::Light).runs_for(secs(1)))
+    .arrive(ms(300), Job::new("b", Class::Light))
+    .arrive(ms(600), Job::new("c", Class::Light))
+    .fault(ms(800), Fault::corrupt_ticket("b"))
+    .expect(Expect::admitted("b"))
+    .expect(Expect::admitted("c"))
+    .expect(Expect::admitted_before("b", "c"))
+    .expect(Expect::never_together("a", "b"))
+    .expect(Expect::never_together("b", "c"))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.
