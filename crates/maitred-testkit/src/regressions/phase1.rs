@@ -32,6 +32,9 @@ pub fn admission() -> Vec<Scenario> {
         no_drain_counts_on_freeing_an_unreadable_ticket(),
         with_no_reliable_load_a_quiet_job_not_yet_due_neither_starts_nor_holds_the_line(),
         with_the_sampler_down_a_due_quiet_job_gets_in_tainted(),
+        the_budget_never_plans_below_the_memory_floor(),
+        after_a_wake_with_no_sampler_the_head_waiter_gets_in_first(),
+        a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit(),
     ]
 }
 
@@ -532,6 +535,93 @@ fn with_the_sampler_down_a_due_quiet_job_gets_in_tainted() -> Scenario {
     .expect(Expect::not_admitted_before("q", secs(5)))
     .expect(Expect::admitted_by("q", secs(6)))
     .expect(Expect::record_flag("q", "tainted"))
+    .run_until(secs(8))
+}
+
+/// Nick's decision on MT-035 (ARCHITECTURE rev 157): `free.mem = mem_available - mem_floor - Σ charged max(0,
+/// reserve.mem - used.mem)`. `a` reserves 8192 MB and uses 8000, so while it runs 16384 - 8000 = 8384 MB is
+/// available and `a` is charged 192 more: `b`'s 8192 doesn't fit in 8384 - 1024 - 192 = 7168, and it waits for `a`
+/// to end at 3 s. Leaving the floor out gives 8384 - 192 = 8192, `b` starts beside `a`, and 16384 - 16000 = 384 MB
+/// available is under `kill_floor` (512), so the kill policy has to step in.
+fn the_budget_never_plans_below_the_memory_floor() -> Scenario {
+    Scenario::new(
+        "the budget keeps the memory floor back, so two jobs that fill the machine don't start together",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-035")
+    .load(Sample::at(ms(0)))
+    .arrive(
+        ms(0),
+        Job::new("a", Class::Light)
+            .reserves(1_000, 8_192)
+            .uses(500, 8_000)
+            .runs_for(secs(3)),
+    )
+    .arrive(
+        ms(1_000),
+        Job::new("b", Class::Light)
+            .reserves(1_000, 8_192)
+            .uses(500, 8_000),
+    )
+    .expect(Expect::admitted_before("a", "b"))
+    .expect(Expect::never_together("a", "b"))
+    .expect(Expect::at_most_kills(Trigger::Memory, 0))
+}
+
+/// QL's hold on MT-039's first fix: after a wake with the sampler down there is no `woke_at`, so the only guard is
+/// each supervisor's own wake (ARCHITECTURE rev 150, "stalled"). The fallback admits the first in waiting once no
+/// living ticket is charged, and judges a waiter stalled after 3 stall limits (3 s) with no pass. `c` runs from 0,
+/// 1.5 s before the sleep and 0.2 s after, so it ends at 9.7 s and keeps both waiters out until then. `w1`'s
+/// supervisor is stopped from 1.4 s to 10 s, so its last pass is over 8 s old when `c` ends and `w2` is certain to
+/// pass first. `w2`'s own gap (1.5 s to 9.5 s) is its wake, so it judges nobody stalled until 10.5 s, still sees
+/// `w1` ahead, and `w1` gets in once it runs again. Without the rule, `w2` admits itself at about 9.7 s.
+fn after_a_wake_with_no_sampler_the_head_waiter_gets_in_first() -> Scenario {
+    Scenario::new(
+        "after a wake with the sampler down, the head waiter gets in first, not whoever passes first",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-039")
+    .sampler_down(ms(0), None)
+    .arrive(ms(0), Job::new("c", Class::Light).runs_for(ms(1_700)))
+    .arrive(ms(300), Job::new("w1", Class::Light))
+    .arrive(ms(600), Job::new("w2", Class::Light))
+    .fault(
+        ms(1_400),
+        Fault::signal("w1", Process::Supervisor, Signal::Stop),
+    )
+    .sleep(ms(1_500), ms(9_500))
+    .fault(
+        ms(10_000),
+        Fault::signal("w1", Process::Supervisor, Signal::Cont),
+    )
+    .expect(Expect::admitted_before("w1", "w2"))
+    .expect(Expect::never_together("w1", "w2"))
+}
+
+/// MT-039's second half: a stopped head still lapses in the fallback, but only after the deciding supervisor has
+/// itself been passing for a stall limit. The sampler is down throughout. `c` keeps `w1` waiting until it ends at
+/// 2 s; `w1`'s supervisor is stopped at 0.5 s and never continued, so by 3.5 s it has gone 3 stall limits without a
+/// pass. `w2` arrives at 5 s. Its first pass has no earlier one to measure from, so it counts as its own wake
+/// (ARCHITECTURE rev 150) and nobody is stalled until 6 s: `w2` waits for the stopped `w1` until then, and is
+/// admitted within a poll interval and its jitter after. Without the own-wake rule it gets in at 5 s; without the
+/// fallback's stall rule, never.
+fn a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit() -> Scenario {
+    Scenario::new(
+        "with the sampler down, a stopped head lapses once a new arrival has waited one stall limit",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-039")
+    .sampler_down(ms(0), None)
+    .arrive(ms(0), Job::new("c", Class::Light).runs_for(secs(2)))
+    .arrive(ms(300), Job::new("w1", Class::Light))
+    .fault(
+        ms(500),
+        Fault::signal("w1", Process::Supervisor, Signal::Stop),
+    )
+    .arrive(ms(5_000), Job::new("w2", Class::Light))
+    .expect(Expect::not_admitted_before("w2", ms(5_800)))
+    .expect(Expect::admitted_by("w2", ms(6_500)))
+    .expect(Expect::never_admitted("w1"))
     .run_until(secs(8))
 }
 
