@@ -1586,3 +1586,25 @@ fn with_a_sample_marked_not_fresh_a_quiet_ticket_not_yet_due_waits() {
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::QuietNeedsIdle));
 }
+
+#[test]
+fn an_aged_ticket_short_of_both_budget_and_a_slot_holds_no_budget() {
+    // Qualmaude's receipt probe on ba2af7b: a slot it can't get makes holding budget useless,
+    // however short the budget is too.
+    let pool = Pool("db".into());
+    let mut holder = ticket("holder", 0, Class::Light, State::Running);
+    holder.reservation = Resources::new(4_000, 1_000);
+    holder.slots.insert(pool.clone(), 1);
+    let mut aged = ticket("aged", 1, Class::Light, State::Waiting);
+    aged.reservation = Resources::new(6_000, 1_000);
+    aged.waited_ms = 600_001;
+    aged.pools.insert(pool.clone());
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![holder, aged, mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}

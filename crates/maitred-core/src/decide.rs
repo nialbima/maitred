@@ -371,12 +371,15 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// Slots first: a ticket short of a slot reports `NoSlot` even when the budget is short too,
+    /// so an aged ticket holds budget only when budget is all it lacks.
     fn fits(&self, t: &Ticket) -> Result<(), Reason> {
+        slots_free(self.snap, t, &self.slots_on_paper)?;
         let r = self.reserve(t);
         if i128::from(r.cpu_millicores) > self.free_cpu || i128::from(r.mem_mb) > self.free_mem {
             return Err(Reason::Budget);
         }
-        slots_free(self.snap, t, &self.slots_on_paper)
+        Ok(())
     }
 
     /// Whether a drain could let `t` in: its memory fits in `drained_mem`, and every pool it asks
