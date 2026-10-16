@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 190, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 192, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -291,7 +291,7 @@ wait(the first rule that held me)
 
 ### Settle and the minimums
 
-The minimum reservation per class bounds a burst within one pass; settle spaces heavy starts across passes, so each new job's ramp-up shows in the samples before the next one starts. The load figures themselves are fresh (CPU over the last 2 s interval, memory now): the lag settle covers is the job's own ramp-up, not measurement. Both numbers come from the observe-only data via the simulator. maitred refuses a machine config whose kill thresholds are out of order: cpu_kill_samples and gpu_kill_samples at least 1, mem_critical below kill_floor below mem_floor, the stall ceilings (cpu_stall_ceiling, cpu_stall_kill_ceiling) within 0 to 1 and above 0, the runnable and thread ceilings above 0, and cpu_stall_kill_ceiling above cpu_stall_ceiling: a ceiling that can never be crossed turns its rule off without a word (MT-033). With no reliable load, admission is one job at a time anyway.
+The minimum reservation per class bounds a burst within one pass; settle spaces heavy starts across passes, so each new job's ramp-up shows in the samples before the next one starts. The load figures themselves are fresh (CPU over the last 2 s interval, memory now): the lag settle covers is the job's own ramp-up, not measurement. Both numbers come from the observe-only data via the simulator. maitred refuses a machine config whose kill thresholds are out of order: cpu_kill_samples and gpu_kill_samples at least 1, mem_critical below kill_floor below mem_floor, the stall ceilings (cpu_stall_ceiling, cpu_stall_kill_ceiling) within 0 to 1 and above 0, the runnable and thread ceilings above 0, quiet_threshold above 0 and below 1, and cpu_stall_kill_ceiling above cpu_stall_ceiling: a ceiling that can never be crossed turns its rule off without a word (MT-033). With no reliable load, admission is one job at a time anyway.
 
 ### Kill policy
 
@@ -416,7 +416,7 @@ Each admission pass, after deciding, spends at most a few milliseconds removing 
 }
 ```
 
-- `quiet_streak`, `over_cpu_streak` and `over_gpu_streak` count consecutive samples whose CPU use is under quiet_threshold of capacity (cpu_used_millicores over capacity, starting at 10%, the same on every platform: a quiet job wants idle cores, and stall near 0 doesn't mean idle), and over the CPU and GPU kill ceilings, so `decide` and `choose_victim` need only this one file. All three restart after a sleep and across a gap in sampling longer than load_freshness (the first sample after it counts as not over), and the two kill streaks after a victim is gone (Kill policy).
+- `quiet_streak`, `over_cpu_streak` and `over_gpu_streak` count consecutive samples whose CPU use is under quiet_threshold of capacity (cpu_used_millicores over capacity, starting at 10%, the same on every platform: a quiet job wants idle cores, and stall near 0 doesn't mean idle), and over the CPU and GPU kill ceilings, so `decide` and `choose_victim` need only this one file. All three restart after a sleep and across a gap in sampling longer than load_freshness (the first sample after it counts toward none of them: not over a kill ceiling, and not quiet; a sample whose CPU use is missing isn't quiet either), and the two kill streaks after a victim is gone (Kill policy).
 - `seq_high` is the largest `seq` the sampler has seen in any ticket, so a new ticket's `seq` never goes backwards when tickets are deleted.
 - **Two kinds of time.** `sampled_at` and `woke_at` are RFC 3339 in UTC with milliseconds and a `Z`, for people. `sampled_at_ms` and `woke_at_ms` are the same moments on the boot clock (The ticket: two slots and a lock), and `boot` says which boot: the ticket header's boot value as 16 lowercase hex digits, so the two compare directly; decisions compare only those, and only when `boot` is the reader's own. `woke_at` and `woke_at_ms` are null if the machine hasn't slept since the sampler started.
 - **Absent or null.** A reading the platform doesn't have is absent: `gpu` on a machine with no readable GPU, `pressure` and cpu_stall outside Linux and cgroups, `sleep_assertions` and `maitred_running_threads` outside macOS. A reading the platform should have but couldn't take is null and named, by its field name (cpu_used_millicores, cpu_stall, cpu_runnable_per_core, mem_available_mb, gpu), in `missing`. Every other field is always present.
