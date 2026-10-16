@@ -33,6 +33,8 @@ pub enum Event {
 /// A reason a scenario can't be run as written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invalid {
+    /// maitred would refuse the machine config, by the rule named (ARCHITECTURE.md, Settle and the minimums).
+    ConfigRefused(&'static str),
     /// Two jobs share a label.
     DuplicateLabel(String),
     /// A job alternates its use with a period of zero.
@@ -208,7 +210,7 @@ impl Scenario {
     ///
     /// Returns each problem found; an empty scenario or a sound one returns `Ok`.
     pub fn validate(&self) -> Result<(), Vec<Invalid>> {
-        let mut problems = Vec::new();
+        let mut problems = self.machine.refused();
         let mut seen = HashSet::new();
         for (_, job) in self.arrivals() {
             if !seen.insert(job.label.as_str()) {

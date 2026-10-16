@@ -88,7 +88,7 @@ fn the_quiet_streak_counts_consecutive_quiet_samples_and_restarts_on_a_busy_one(
 fn the_cpu_streak_counts_consecutive_samples_over_the_kill_ceiling() {
     let mut publisher = Publisher::new(&machine());
 
-    // Stall of 950 thousandths is over the stall kill ceiling of 900.
+    // Stall of 950 thousandths is over the stall kill ceiling of 600.
     let streaks: Vec<u32> = [950, 950, 100, 950]
         .iter()
         .enumerate()
@@ -206,11 +206,11 @@ fn a_sample_that_began_exactly_when_the_victim_was_gone_doesnt_count() {
 }
 
 #[test]
-fn a_missing_stall_reading_counts_toward_no_quiet_or_cpu_streak_on_linux() {
+fn a_missing_stall_reading_counts_toward_no_cpu_streak_but_leaves_the_quiet_streak_alone() {
     let mut publisher = Publisher::new(&machine());
     publisher.publish(&Sample::at(ms(200)), &[], None);
 
-    let quiet_but_unread =
+    let quiet_and_unread =
         publisher.publish(&Sample::at(ms(400)).missing(Reading::CpuStall), &[], None);
     let over_but_unread = publisher.publish(
         &Sample::at(ms(600)).stall(950).missing(Reading::CpuStall),
@@ -218,8 +218,19 @@ fn a_missing_stall_reading_counts_toward_no_quiet_or_cpu_streak_on_linux() {
         None,
     );
 
-    assert_eq!(quiet_but_unread.quiet_streak, 0);
+    // The quiet streak reads CPU use, not stall (ARCHITECTURE rev 190).
+    assert_eq!(quiet_and_unread.quiet_streak, 2);
     assert_eq!(over_but_unread.over_cpu_streak, 0);
+}
+
+#[test]
+fn a_missing_cpu_use_reading_counts_toward_no_quiet_streak() {
+    let mut publisher = Publisher::new(&machine());
+    publisher.publish(&Sample::at(ms(200)), &[], None);
+
+    let unread = publisher.publish(&Sample::at(ms(400)).missing(Reading::Cpu), &[], None);
+
+    assert_eq!(unread.quiet_streak, 0);
 }
 
 #[test]
@@ -239,7 +250,7 @@ fn a_missing_gpu_reading_counts_toward_no_gpu_streak() {
 #[test]
 fn on_macos_the_cpu_streak_counts_maitreds_running_threads_while_the_cpu_is_saturated() {
     let mut publisher = Publisher::new(&machine().on_macos());
-    // 40 threads on 8 cores is 5 per core, over the kill ceiling of 4, and the jobs saturate the CPU.
+    // 40 threads on 8 cores is 5 per core, over the threads kill ceiling of 2, and the jobs saturate the CPU.
     let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
     // The same threads with the CPU not saturated don't count.
     let idle_cpu = [Running::measured("a", job(2_000, 0)).threads(40)];
@@ -299,7 +310,7 @@ fn demand_alone_never_starts_the_cpu_streak_on_linux() {
 }
 
 #[test]
-fn on_macos_a_missing_runnable_reading_counts_toward_no_quiet_streak() {
+fn on_macos_a_missing_runnable_reading_leaves_the_quiet_streak_alone() {
     let mut publisher = Publisher::new(&machine().on_macos());
     publisher.publish(&Sample::at(ms(200)), &[], None);
 
@@ -309,7 +320,7 @@ fn on_macos_a_missing_runnable_reading_counts_toward_no_quiet_streak() {
         None,
     );
 
-    assert_eq!(unread.quiet_streak, 0);
+    assert_eq!(unread.quiet_streak, 2);
 }
 
 #[test]
@@ -330,8 +341,8 @@ fn a_job_counts_its_cpu_use_as_running_threads_in_thousandths() {
 #[test]
 fn stall_just_over_the_kill_ceiling_counts_as_over() {
     let mut publisher = Publisher::new(&machine());
-    // 901 thousandths, just over the stall kill ceiling of 900.
-    let load_file = publisher.publish(&Sample::at(ms(200)).stall(901), &[], None);
+    // 601 thousandths, just over the stall kill ceiling of 600.
+    let load_file = publisher.publish(&Sample::at(ms(200)).stall(601), &[], None);
 
     assert_eq!(load_file.over_cpu_streak, 1);
 }

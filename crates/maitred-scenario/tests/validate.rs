@@ -532,3 +532,72 @@ fn a_storm_no_slower_than_the_poll_interval_slows_nothing_and_is_refused() {
         }])
     );
 }
+
+fn one_job_on(machine: MachineConfig) -> Scenario {
+    Scenario::new("one job", machine).arrive(ms(0), Job::new("a", Class::Light))
+}
+
+#[test]
+fn a_stall_kill_ceiling_not_above_the_stall_ceiling_is_refused_as_maitred_would() {
+    let mut config = machine();
+    config.cpu_stall_kill_ceiling_permille = config.cpu_stall_ceiling_permille;
+
+    assert_eq!(
+        one_job_on(config).validate(),
+        Err(vec![Invalid::ConfigRefused(
+            "cpu_stall_kill_ceiling above cpu_stall_ceiling"
+        )])
+    );
+}
+
+#[test]
+fn a_stall_ceiling_past_the_whole_interval_is_refused() {
+    let mut config = machine();
+    config.cpu_stall_kill_ceiling_permille = 1_001;
+
+    assert_eq!(
+        one_job_on(config).validate(),
+        Err(vec![Invalid::ConfigRefused(
+            "the stall ceilings within 0 to 1 and above 0"
+        )])
+    );
+}
+
+#[test]
+fn a_zero_runnable_or_thread_ceiling_is_refused() {
+    let mut config = machine();
+    config.cpu_threads_kill_ceiling_permille = 0;
+
+    assert_eq!(
+        one_job_on(config).validate(),
+        Err(vec![Invalid::ConfigRefused(
+            "the runnable and thread ceilings above 0"
+        )])
+    );
+}
+
+#[test]
+fn memory_thresholds_out_of_order_are_refused() {
+    let mut config = machine();
+    config.kill_floor_mb = config.mem_floor_mb;
+
+    assert_eq!(
+        one_job_on(config).validate(),
+        Err(vec![Invalid::ConfigRefused(
+            "mem_critical below kill_floor below mem_floor"
+        )])
+    );
+}
+
+#[test]
+fn no_kill_samples_is_refused() {
+    let mut config = machine();
+    config.gpu_kill_samples = 0;
+
+    assert_eq!(
+        one_job_on(config).validate(),
+        Err(vec![Invalid::ConfigRefused(
+            "cpu_kill_samples and gpu_kill_samples at least 1"
+        )])
+    );
+}

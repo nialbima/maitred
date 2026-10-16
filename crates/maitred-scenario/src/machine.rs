@@ -5,6 +5,7 @@
 //! default the scenario didn't choose.
 
 use crate::Class;
+use crate::scenario::Invalid;
 use crate::time::{Ms, ms, secs};
 
 /// Cores in millicores, memory in megabytes: the units ARCHITECTURE uses throughout.
@@ -96,9 +97,9 @@ impl MachineConfig {
     /// An 8-core, 16 GB Linux machine with every duration short enough for a test to run in seconds.
     ///
     /// The ratios between durations follow ARCHITECTURE's defaults (stall limit 5 poll intervals,
-    /// freshness 3 sample intervals), so shortening time doesn't change which rule fires first. The admission
-    /// ceilings are the doc's starting values (0.3 stall, 1.5 runnable per core); the kill ceilings are this kit's
-    /// own, since the doc gives no starting values for them yet.
+    /// freshness 3 sample intervals), so shortening time doesn't change which rule fires first. The CPU ceilings are
+    /// the doc's starting values: 0.3 stall and 1.5 runnable per core to admit, 0.6 stall and 2.0 threads per core to
+    /// kill (ARCHITECTURE rev 190).
     #[must_use]
     pub fn for_tests() -> Self {
         let sample = ms(200);
@@ -115,8 +116,8 @@ impl MachineConfig {
             gpu_ceiling_permille: 950,
             kill_floor_mb: 512,
             mem_critical_mb: 256,
-            cpu_stall_kill_ceiling_permille: 900,
-            cpu_threads_kill_ceiling_permille: 4_000,
+            cpu_stall_kill_ceiling_permille: 600,
+            cpu_threads_kill_ceiling_permille: 2_000,
             cpu_kill_samples: 3,
             gpu_kill_ceiling_permille: 980,
             gpu_kill_samples: 3,
@@ -224,6 +225,40 @@ impl MachineConfig {
             Class::Heavy => self.heavy,
             Class::Quiet => self.quiet,
         }
+    }
+
+    /// Each rule maitred refuses this config by (ARCHITECTURE.md, Settle and the minimums): a ceiling that can never
+    /// be crossed would turn its rule off without a word.
+    pub(crate) fn refused(&self) -> Vec<Invalid> {
+        let stall_ok = |permille: u32| (1..=1_000).contains(&permille);
+        [
+            (
+                self.cpu_kill_samples >= 1 && self.gpu_kill_samples >= 1,
+                "cpu_kill_samples and gpu_kill_samples at least 1",
+            ),
+            (
+                self.mem_critical_mb < self.kill_floor_mb && self.kill_floor_mb < self.mem_floor_mb,
+                "mem_critical below kill_floor below mem_floor",
+            ),
+            (
+                stall_ok(self.cpu_stall_ceiling_permille)
+                    && stall_ok(self.cpu_stall_kill_ceiling_permille),
+                "the stall ceilings within 0 to 1 and above 0",
+            ),
+            (
+                self.cpu_runnable_ceiling_permille > 0
+                    && self.cpu_threads_kill_ceiling_permille > 0,
+                "the runnable and thread ceilings above 0",
+            ),
+            (
+                self.cpu_stall_kill_ceiling_permille > self.cpu_stall_ceiling_permille,
+                "cpu_stall_kill_ceiling above cpu_stall_ceiling",
+            ),
+        ]
+        .into_iter()
+        .filter(|(holds, _)| !holds)
+        .map(|(_, rule)| Invalid::ConfigRefused(rule))
+        .collect()
     }
 
     pub(crate) fn declares_pool(&self, name: &str) -> bool {

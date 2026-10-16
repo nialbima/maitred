@@ -226,10 +226,10 @@ impl Publisher {
     /// scenario supplies it: the simulator from its own model, the real-process runner from when the victim's
     /// session emptied.
     ///
-    /// A missing figure for the platform's CPU limit (stall on Linux, runnable work per core on macOS) counts toward
-    /// no quiet streak; a missing stall reading toward no CPU-kill streak on Linux, and a missing CPU reading on
-    /// macOS; a missing GPU reading toward no GPU streak (ARCHITECTURE.md, Critical readings). The quiet streak still
-    /// counts demand under the quiet threshold of capacity: the doc doesn't yet say which figure it reads.
+    /// The quiet streak counts CPU use under the quiet threshold of capacity, on every platform, and a missing CPU
+    /// reading counts toward no quiet streak (ARCHITECTURE rev 190). A missing stall reading counts toward no CPU-kill
+    /// streak on Linux, and a missing CPU reading on macOS; a missing GPU reading toward no GPU streak
+    /// (ARCHITECTURE.md, Critical readings).
     pub fn publish(
         &mut self,
         sample: &Sample,
@@ -254,10 +254,6 @@ impl Publisher {
         let counts_for_kill = !woke && !gap && victim_gone.is_none_or(|gone| began > gone);
         let stall_read = !sample.missing.contains(&Reading::CpuStall);
         let runnable_read = !sample.missing.contains(&Reading::CpuRunnable);
-        let limit_figure_read = match self.platform {
-            Platform::Linux => stall_read,
-            Platform::MacOs => runnable_read,
-        };
         let cpu_read = !sample.missing.contains(&Reading::Cpu);
         let capacity = u64::from(self.capacity.cpu_millicores);
         // Comparisons are exact: demand per core over a ceiling in thousandths, without rounding the quotient.
@@ -265,8 +261,10 @@ impl Publisher {
             |amount: u32, ceiling: u32| u64::from(amount) * 1_000 > u64::from(ceiling) * capacity;
         let gpu_read = !sample.missing.contains(&Reading::Gpu);
 
-        let quiet = u64::from(demand) * 1_000 < u64::from(self.quiet_threshold) * capacity;
-        self.quiet_streak = if woke || gap || !limit_figure_read || !quiet {
+        // cpu_used_millicores over capacity, as the doc defines the quiet streak.
+        let cpu_used = demand.min(self.capacity.cpu_millicores);
+        let quiet = u64::from(cpu_used) * 1_000 < u64::from(self.quiet_threshold) * capacity;
+        self.quiet_streak = if woke || gap || !cpu_read || !quiet {
             0
         } else {
             self.quiet_streak + 1
@@ -303,7 +301,7 @@ impl Publisher {
             fresh: !woke,
             woke_at: self.woke_at,
             capacity: self.capacity,
-            cpu_used_millicores: demand.min(self.capacity.cpu_millicores),
+            cpu_used_millicores: cpu_used,
             cpu_stall_permille: (self.platform == Platform::Linux).then_some(if stall_read {
                 sample.stall_permille
             } else {
