@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 125, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 127, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -278,7 +278,7 @@ wait(the first rule that held me)
 | --- | --- |
 | `reserve(t)` | `max(t.reservation, class_min[t.class])` per dimension, capped at capacity. It fits free only if, besides cores and memory, each pool it asks a slot of has a free one: a slot no ticket names, and that no ticket admitted earlier in this walk has taken on paper |
 | `used` | a running ticket's use as the sampler copied it into the current sample (`jobs` in `load/now.json`) from the job's holder, which writes it every pass; only a measurement whose window overlaps the sample's own interval is copied. Otherwise 0, so the ticket holds its whole reservation. Taking both terms from one sample keeps a job from falling out of both. Orphans and unknown tickets count as using nothing |
-| `cpu_pressure` | runnable work per core over the last sample interval, from the load file (Sampler); not utilisation, which reads 100% for one healthy build on every core |
+| `cpu_pressure` | runnable work per core over the last sample interval, from the load file (Sampler); on macOS, which has no such figure, the 1-minute load average per core, which lags (What it reads), so the field is present there too; not utilisation, which reads 100% for one healthy build on every core |
 | allowed | **light:** always. **heavy:** fewer than `max_running.heavy` charged or admitted on paper, and `now - last_heavy >= settle`. **quiet:** no living ticket charged or admitted on paper, and `quiet_streak >= 2` in the load file; or it has waited past `quiet_max_wait`, in which case the streak isn't needed. A quiet job that gets in without the streak, by this rule, by first-in or after a drain, has its record marked `tainted`; one that had the streak isn't, however long it waited |
 | aged | waited past `aging` (any class), counted on the clock that stops in sleep. An aged ticket that its class allows but the budget doesn't holds its reservation out of `free`, so later tickets can only fill around it, and it gets in as soon as the budget it holds is really free. The hold lapses after `aging_hold` more, so a ticket that can't fit doesn't block everyone behind it for ever; from then on it drains the machine instead, as a due quiet ticket does: the walk stops at it, nothing new starts, and once no living ticket is charged it gets in first. It drains only while its class allows it, since draining frees nothing a class rule (settle, max_running) waits on, and only while its memory fits once drained; a ticket that could never fit doesn't stop the queue, it waits, and status says load from outside maitred keeps it out. So every ticket that can fit is admitted eventually, at the cost of the queue waiting for the longest job running when the drain began. One that its class rules keep out (settle, `max_running`) holds nothing, since holding budget wouldn't let it in sooner |
 | due quiet | past `quiet_max_wait`, a quiet ticket stops the walk so the machine drains for it, until it gets in. Draining is what gives a job that needs an idle machine its empty queue under steady traffic; what draining can't remove (load from outside maitred) is why it then runs tainted. Like first-in, it never waives memory |
@@ -394,7 +394,7 @@ Each admission pass, after deciding, spends at most a few milliseconds removing 
   "boot": "…",
   "interval_ms": 2000,
   "fresh": true,
-  "woke_at": "2026-10-07T08:02:11Z",
+  "woke_at": "2026-10-07T08:02:11.000Z",
   "woke_at_ms": 81211,
   "capacity": { "cpu_millicores": 8000, "mem_mb": 16384 },
   "cpu_used_millicores": 4960,
