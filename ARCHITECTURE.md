@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 201, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 202, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -59,7 +59,7 @@ A ticket has three written states, an end, one marked state and one computed sta
 | waiting | admitted | `decide` admits it; its slots are taken | its supervisor, under `admit.lock` |
 | admitted | running | the supervisor writes the holder's pid, session and start time into the ticket, then opens the gate; the holder forks the job and execs the command | its supervisor |
 | running | stopping | `choose_victim` names it | its holder, under `admit.lock`: it creates and locks the stop marker |
-| stopping | ended | the job's processes are gone (or a bounded wait has passed) and the sampler has published a sample whose interval began after that: record first, then the ticket, then the marker. A cancel or a signal to the supervisor meanwhile doesn't end it: the kill finishes, and the record says killed, noting the cancel or signal (Nick, 2026-10-16) | the supervisor, then the holder |
+| stopping | ended | the job's processes are gone (or a bounded wait has passed) and the sampler has published a sample whose interval began after that: record first, then the ticket, then the marker. A cancel or a signal to the supervisor meanwhile doesn't end it: the kill finishes, and the record says killed with the flag cancelled-during-kill (and the cancel's sender and reason) or signalled-during-kill (and the signal) (Nick, 2026-10-16) | the supervisor, then the holder |
 | running | ended | the job exits (completed), is cancelled, is signalled (stopped by signal) or loses its holder (holder lost; mid-kill too, when the supervisor stops the session itself and removes the dead holder's marker after the ticket): record first, then delete | its supervisor |
 | waiting or admitted | ended | cancelled, timed out (waiting only: --timeout passes before admission), signalled (abandoned), or the spawn failed (admitted only): record first, then delete; the parked holder sees its gate close and exits | its supervisor |
 | any | orphaned (computed) | its supervisor dies; the kernel frees the lock | nobody: readers see the free lock |
