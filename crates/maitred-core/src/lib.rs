@@ -10,6 +10,7 @@
 
 mod config;
 mod decide;
+pub mod lifecycle;
 mod resources;
 mod snapshot;
 #[cfg(test)]
