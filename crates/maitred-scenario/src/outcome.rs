@@ -10,15 +10,20 @@ pub enum Trigger {
     Gpu,
 }
 
-/// How a run ended, as its record says (ARCHITECTURE.md: Project files, `record.json`).
+/// How a run ended, as its record says (ARCHITECTURE.md: Project files, `record.json`), or `Lost`, which is `wait`'s
+/// answer when there is neither ticket nor record and is never written.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum End {
-    Completed { status: u8 },
+    Completed {
+        status: u8,
+    },
     Cancelled,
     TimedOut,
     Killed(Trigger),
     StoppedBySignal,
     Abandoned,
+    /// Admitted, but the job couldn't be started.
+    SpawnFailed,
     Interrupted,
     HolderLost,
     Expired,

@@ -486,3 +486,18 @@ fn both_named_jobs_killed_in_time_fails() {
         }])
     );
 }
+
+#[test]
+fn a_job_whose_spawn_failed_ends_that_way_and_not_as_completed() {
+    let scenario = two_heavy_jobs().expect(Expect::ends("a", End::SpawnFailed));
+    let failed = Outcome::new()
+        .admitted("a", ms(100))
+        .ended_at("a", End::SpawnFailed, ms(150));
+    let completed =
+        Outcome::new()
+            .admitted("a", ms(100))
+            .ended_at("a", End::Completed { status: 0 }, ms(150));
+
+    assert_eq!(scenario.judge(&failed), Ok(()));
+    assert!(scenario.judge(&completed).is_err());
+}
