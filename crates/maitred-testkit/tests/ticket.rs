@@ -339,3 +339,26 @@ fn a_ticket_of_a_newer_minor_version_is_read_from_its_header() {
 
     assert_eq!(read_ticket(&file(&older, &newer)).generation(), Some(2));
 }
+
+#[test]
+fn an_unknown_code_in_either_field_reads_the_whole_ticket_as_heavy_and_running() {
+    let unknown_class = Header {
+        class: 9,
+        state: 0,
+        ..header(1)
+    };
+    let unknown_state = Header {
+        class: 0,
+        state: 9,
+        ..header(1)
+    };
+
+    assert_eq!(
+        (unknown_class.class(), unknown_class.state()),
+        (maitred_scenario::Class::Heavy, StateCode::Running)
+    );
+    assert_eq!(
+        (unknown_state.class(), unknown_state.state()),
+        (maitred_scenario::Class::Heavy, StateCode::Running)
+    );
+}

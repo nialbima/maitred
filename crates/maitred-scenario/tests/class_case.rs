@@ -225,3 +225,27 @@ fn slots_are_compared_whatever_their_order() {
         Ok(())
     );
 }
+
+#[test]
+fn a_case_naming_a_reservation_fails_on_a_different_one() {
+    let case = ClassCase::argv("largest reservation", CLASSES, &["bin/mutant"])
+        .expect_match(MatchExpect::queued(Class::Heavy).reserves(8_000, 6_144));
+
+    assert_eq!(
+        case.judge_match(&Matched::queued(Class::Heavy).reservation(8_000, 6_144)),
+        Ok(())
+    );
+    assert!(
+        case.judge_match(&Matched::queued(Class::Heavy).reservation(4_000, 2_048))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_case_expected_to_fail_names_the_entry_that_tracks_the_gap() {
+    let case = ClassCase::hook("a known gap", CLASSES, "if bin/mutant run; then :; fi")
+        .expect_hook(Hook::refuse("bin/mutant"))
+        .fails_until("MT-002");
+
+    assert_eq!(case.known_gap.as_deref(), Some("MT-002"));
+}

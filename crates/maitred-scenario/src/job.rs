@@ -30,7 +30,7 @@ pub struct Job {
     /// Whether its holder's measurement reaches the sample (see [`crate::Running`]).
     pub measured: bool,
     /// Its running threads, as its holder counts them into `maitred_running_threads` on macOS; `None` means its
-    /// CPU use in whole cores, rounded up.
+    /// CPU use, as threads in thousandths.
     pub running_threads: Option<u32>,
 }
 
@@ -102,11 +102,14 @@ impl Job {
         self
     }
 
-    /// Its running threads: as set, or its CPU use in whole cores, rounded up.
+    /// Its running threads in thousandths: as set, or its CPU use (a job using 1100 millicores has about 1.1 threads
+    /// running).
     #[must_use]
-    pub fn threads(&self) -> u32 {
+    pub fn threads_milli(&self) -> u32 {
         self.running_threads
-            .unwrap_or_else(|| self.uses.cpu_millicores.div_ceil(1_000))
+            .map_or(self.uses.cpu_millicores, |threads| {
+                threads.saturating_mul(1_000)
+            })
     }
 
     /// Sets the status it exits with.

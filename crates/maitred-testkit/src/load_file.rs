@@ -34,7 +34,8 @@ pub struct Written<'a> {
     pub clocks: Clocks,
     /// The ticket header's `boot` value; written as 16 lowercase hex digits.
     pub boot: u64,
-    /// Each running job's ticket id, by label, as `replay` found them in `tickets/`.
+    /// Each running job's ticket id, by label, as `replay` found them in `tickets/`. The runner passes the publisher
+    /// only the jobs it found a ticket for, so `jobs` and `maitred_running_threads` count the same jobs.
     pub tickets: &'a [(&'a str, &'a str)],
     pub seq_high: u64,
 }
@@ -206,7 +207,9 @@ fn readings(json: &mut String, published: &Published, platform: Platform) {
         "\"quiet_streak\":{},\"over_cpu_streak\":{},\"over_gpu_streak\":{},",
         published.quiet_streak, published.over_cpu_streak, published.over_gpu_streak
     );
-    if platform == Platform::Linux {
+    if platform == Platform::Linux && published.missing.contains(&Reading::CpuPressure) {
+        json.push_str("\"pressure\":null,");
+    } else if platform == Platform::Linux {
         // Decisions read cpu_pressure, not these averages, so scenarios don't model them.
         json.push_str(
             "\"pressure\":{\"cpu_some_avg10\":0.0,\"mem_some_avg10\":0.0,\"level\":\"normal\"},",

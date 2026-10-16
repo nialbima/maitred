@@ -48,9 +48,13 @@ pub enum StateCode {
 }
 
 impl Header {
-    /// The class, reading a code this reader doesn't know as heavy (the doc's rule for a newer minor).
+    /// The class. If either code is one this reader doesn't know, the whole ticket reads as heavy and running (the
+    /// doc's rule for a newer minor), so it is charged rather than queued.
     #[must_use]
     pub fn class(&self) -> Class {
+        if !self.codes_known() {
+            return Class::Heavy;
+        }
         match self.class {
             0 => Class::Light,
             2 => Class::Quiet,
@@ -64,9 +68,12 @@ impl Header {
         self.class <= 2 && self.state <= 2
     }
 
-    /// The state, reading a code this reader doesn't know as running.
+    /// The state; running if either code is one this reader doesn't know (see [`Header::class`]).
     #[must_use]
     pub fn state(&self) -> StateCode {
+        if !self.codes_known() {
+            return StateCode::Running;
+        }
         match self.state {
             0 => StateCode::Waiting,
             1 => StateCode::Admitted,

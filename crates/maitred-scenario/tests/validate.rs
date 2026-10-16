@@ -164,17 +164,18 @@ fn a_machine_sleep_that_ends_before_it_starts_is_refused() {
 }
 
 #[test]
-fn a_jobs_threads_default_to_its_cpu_in_whole_cores_rounded_up() {
-    assert_eq!(Job::new("a", Class::Light).uses(2_500, 0).threads(), 3);
-    assert_eq!(Job::new("b", Class::Light).uses(2_000, 0).threads(), 2);
-    assert_eq!(Job::new("c", Class::Light).uses(100, 0).threads(), 1);
-    assert_eq!(Job::new("d", Class::Light).uses(0, 0).threads(), 0);
+fn a_jobs_running_threads_default_to_its_cpu_use_in_thousandths() {
     assert_eq!(
-        Job::new("e", Class::Light)
+        Job::new("a", Class::Light).uses(2_500, 0).threads_milli(),
+        2_500
+    );
+    assert_eq!(Job::new("b", Class::Light).uses(0, 0).threads_milli(), 0);
+    assert_eq!(
+        Job::new("c", Class::Light)
             .uses(2_500, 0)
             .with_threads(8)
-            .threads(),
-        8
+            .threads_milli(),
+        8_000
     );
 }
 
@@ -268,5 +269,53 @@ fn never_together_naming_one_job_twice_is_refused() {
     assert_eq!(
         scenario.validate(),
         Err(vec![Invalid::DuplicateLabel("a".into())])
+    );
+}
+
+#[test]
+fn expectations_that_contradict_each_other_are_refused() {
+    let scenario = Scenario::new("contradictions", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(1_000), Job::new("b", Class::Light))
+        .expect(Expect::never_admitted("a"))
+        .expect(Expect::admitted_by("a", ms(500)))
+        .expect(Expect::admitted_before("a", "b"))
+        .expect(Expect::admitted_before("b", "a"))
+        .expect(Expect::killed("b", maitred_scenario::Trigger::Memory))
+        .expect(Expect::not_killed("b"))
+        .run_until(secs(10));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![
+            Invalid::Contradicts("a".into()),
+            Invalid::Contradicts("a".into()),
+            Invalid::Contradicts("b".into()),
+        ])
+    );
+}
+
+#[test]
+fn a_scenario_expecting_a_job_never_to_start_must_say_when_the_run_stops() {
+    let scenario = Scenario::new("never, with no end", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .expect(Expect::never_admitted("a"));
+
+    assert_eq!(scenario.validate(), Err(vec![Invalid::NeedsAnEnd]));
+}
+
+#[test]
+fn a_run_that_stops_before_a_time_an_expectation_names_is_refused() {
+    let scenario = Scenario::new("stops before the expectation can be judged", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .expect(Expect::not_admitted_before("a", secs(60)))
+        .run_until(secs(2));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::StopsBeforeExpectation {
+            until: secs(2),
+            named: secs(60)
+        }])
     );
 }

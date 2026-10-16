@@ -119,3 +119,14 @@ fn a_running_job_whose_ticket_replay_hasnt_found_isnt_listed() {
 
     assert!(json.contains("\"jobs\":{},"), "{json}");
 }
+
+#[test]
+fn an_unread_pressure_reading_writes_the_pressure_block_as_null_not_normal() {
+    let json = now_json(
+        &published(&Sample::at(ms(2_000)).missing(Reading::CpuPressure)),
+        &inputs(Platform::Linux),
+    );
+
+    assert!(json.contains("\"cpu_pressure\":null,"), "{json}");
+    assert!(json.contains("\"pressure\":null,"), "{json}");
+}

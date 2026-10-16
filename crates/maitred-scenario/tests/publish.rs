@@ -276,3 +276,62 @@ fn a_missing_pressure_reading_publishes_no_made_up_figure() {
 
     assert_eq!(load_file.cpu_pressure_permille, 0);
 }
+
+#[test]
+fn a_job_counts_its_cpu_use_as_running_threads_in_thousandths() {
+    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    // 1100 millicores is about 1.1 running threads, not 2; eight such jobs are 8.8 threads on 8 cores.
+    let jobs: Vec<Running> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        .into_iter()
+        .map(|label| Running::measured(label, job(1_100, 0)))
+        .collect();
+
+    let load_file = publisher.publish(&Sample::at(ms(200)), &jobs, None);
+
+    assert_eq!(load_file.maitred_running_threads, 9);
+    assert_eq!(load_file.over_cpu_streak, 0);
+}
+
+#[test]
+fn demand_just_over_the_kill_ceiling_counts_as_over() {
+    let mut publisher = Publisher::new(&machine());
+    // 32007 millicores on 8000 is 4.000875 runnable per core, just over the ceiling of 4.
+    let load_file = publisher.publish(&Sample::at(ms(200)).background(32_007, 0), &[], None);
+
+    assert_eq!(load_file.over_cpu_streak, 1);
+}
+
+#[test]
+fn on_macos_a_missing_cpu_reading_counts_toward_no_cpu_streak() {
+    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
+
+    let load_file = publisher.publish(&Sample::at(ms(200)).missing(Reading::Cpu), &busy, None);
+
+    assert_eq!(load_file.over_cpu_streak, 0);
+}
+
+#[test]
+fn a_gap_in_sampling_longer_than_load_freshness_restarts_every_streak() {
+    let mut publisher = Publisher::new(&machine());
+    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+
+    publisher.publish(&over(200), &[], None);
+    publisher.publish(&over(400), &[], None);
+    // load_freshness is 3 intervals (600 ms); this sample comes 10 s after the last.
+    let after_gap = publisher.publish(&over(10_400), &[], None);
+    let next = publisher.publish(&over(10_600), &[], None);
+
+    assert_eq!((after_gap.over_cpu_streak, next.over_cpu_streak), (0, 1));
+}
+
+#[test]
+fn a_gap_within_load_freshness_keeps_the_streak() {
+    let mut publisher = Publisher::new(&machine());
+    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+
+    publisher.publish(&over(200), &[], None);
+    let after_short_gap = publisher.publish(&over(700), &[], None);
+
+    assert_eq!(after_short_gap.over_cpu_streak, 2);
+}

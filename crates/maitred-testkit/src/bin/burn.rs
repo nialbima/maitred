@@ -17,6 +17,10 @@
 //! its default action. With `--exit` on a signal, it still waits for the children it started (not the orphan or
 //! the daemon) before it exits.
 //!
+//! `--armed PATH` is written as soon as the signal handlers are in, before any load. `--children-keep-signals` lets
+//! children inherit this burn's ignored signals, as a child of `nohup` would. The daemon is started by a middle
+//! process that exits at once, so its parent is init, and it has none of the job's stdin, stdout or stderr.
+//!
 //! `--ready PATH` is written once the signal handlers are in, every child has started, the memory is touched and the
 //! spinners run. It lists `pid`, `orphan`, `daemon`, `children` and `resident_mb` in the report's format, so a test
 //! or the runner signals or measures `burn` only once it is ready.
@@ -81,6 +85,12 @@ struct Args {
     /// Set on a daemon started by another burn: what it leaves before doing anything else.
     detach: Option<Detach>,
     ready: Option<String>,
+    /// Written as soon as the signal handlers are in, before any load: when a signal is sure to be handled.
+    armed: Option<String>,
+    /// Children keep this burn's signal dispositions, as a child of `nohup` would.
+    children_keep_signals: bool,
+    /// Set on the short-lived middle process that starts a daemon and exits, so the daemon's parent is init.
+    launch_daemon: Option<Detach>,
 }
 
 fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -104,6 +114,9 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
                 args.print_every_ms = Some(every);
             }
             "--ready" => args.ready = Some(value()?),
+            "--armed" => args.armed = Some(value()?),
+            "--children-keep-signals" => args.children_keep_signals = true,
+            "--launch-daemon" => args.launch_daemon = Some(detach(&value()?)?),
             "--port" => args.port = true,
             "--report" => args.report = Some(value()?),
             "--children" => args.children = number(&value()?)?,
@@ -172,21 +185,30 @@ fn leave(how: Detach) -> bool {
     result != -1
 }
 
-/// Starts burn again with no load of its own, running for `run_ms`, plus `extra` arguments.
-fn start_burn(run_ms: u64, extra: &[&str]) -> Child {
+/// Starts burn again with no load of its own, running for `run_ms`, plus `extra` arguments. Unless `keep_signals`,
+/// the child starts with TERM and INT at their default action.
+fn burn_command(run_ms: u64, extra: &[&str], keep_signals: bool) -> Command {
     let exe = env::current_exe().expect("burn: can't find its own binary");
     let mut command = Command::new(exe);
     command.args(["--run-ms", &run_ms.to_string()]).args(extra);
-    // SAFETY: between fork and exec only `signal` runs, which is async-signal-safe. It puts TERM and INT back to
-    // their default action, which an ignored disposition would otherwise carry through exec into the child.
-    unsafe {
-        command.pre_exec(|| {
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            Ok(())
-        });
+    if !keep_signals {
+        // SAFETY: between fork and exec only `signal` runs, which is async-signal-safe. It puts TERM and INT back
+        // to their default action, which an ignored disposition would otherwise carry through exec into the child.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
     }
-    command.spawn().expect("burn: can't start a child")
+    command
+}
+
+fn start_burn(run_ms: u64, extra: &[&str], keep_signals: bool) -> Child {
+    burn_command(run_ms, extra, keep_signals)
+        .spawn()
+        .expect("burn: can't start a child")
 }
 
 fn number<T: std::str::FromStr>(text: &str) -> Result<T, String> {
@@ -222,13 +244,47 @@ fn spin(millicores: u64, stop: &Arc<AtomicBool>) -> Vec<thread::JoinHandle<()>> 
         .collect()
 }
 
-/// Allocates `mb` megabytes and writes to every page, so all of it is resident.
+/// Allocates `mb` megabytes and fills every byte with varying data, so all of it is resident and none of it
+/// compresses (macOS compresses pages of zeros). Stops early if a signal asked burn to exit.
 fn touch(mb: u64) -> Vec<u8> {
     let mut memory = vec![0_u8; usize::try_from(mb * 1024 * 1024).unwrap_or(usize::MAX)];
-    for page in memory.chunks_mut(4096) {
-        page[0] = 1;
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    for megabyte in memory.chunks_mut(1024 * 1024) {
+        if EXIT_REQUESTED.load(Ordering::SeqCst) {
+            break;
+        }
+        for word in megabyte.chunks_mut(8) {
+            // xorshift64: cheap, and no two pages alike.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+        }
     }
     black_box(memory)
+}
+
+/// This process's peak physical footprint in megabytes, the figure macOS's memory accounting uses (it counts
+/// compressed memory, which `ru_maxrss` doesn't). `None` on other platforms.
+fn peak_footprint_mb() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: proc_pid_rusage writes one rusage_info_v4 into the zeroed struct on this stack.
+        let info = unsafe {
+            let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+            let got = libc::proc_pid_rusage(
+                i32::try_from(std::process::id()).ok()?,
+                libc::RUSAGE_INFO_V4,
+                (&raw mut info).cast(),
+            );
+            (got == 0).then_some(info)?
+        };
+        Some(info.ri_lifetime_max_phys_footprint / (1024 * 1024))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 /// This process's CPU time so far, and its peak resident size, from `getrusage`.
@@ -289,6 +345,13 @@ fn report(args: &Args, port: Option<u16>, children: &[u32], orphan: Option<u32>)
     );
     let _ = writeln!(text, "cpu_ms {cpu_ms}");
     let _ = writeln!(text, "peak_resident_mb {resident_mb}");
+    let _ = writeln!(
+        text,
+        "peak_footprint_mb {}",
+        peak_footprint_mb().map_or_else(|| "none".into(), |mb| mb.to_string())
+    );
+    // SAFETY: getppid only reads the calling process's parent id.
+    let _ = writeln!(text, "ppid {}", unsafe { libc::getppid() });
     let ids: Vec<String> = children.iter().map(ToString::to_string).collect();
     let _ = writeln!(
         text,
@@ -308,32 +371,64 @@ fn report(args: &Args, port: Option<u16>, children: &[u32], orphan: Option<u32>)
     text
 }
 
-/// Starts the children, the orphan and the daemon `args` ask for.
-fn start_children(args: &Args) -> (Vec<Child>, Option<Child>, Option<Child>) {
+/// Starts the children, the orphan and the daemon `args` ask for. The daemon is started by a middle process that
+/// exits at once, so its parent is init, as a daemon's is; its pid comes back from that middle process.
+fn start_children(args: &Args) -> (Vec<Child>, Option<Child>, Option<u32>) {
+    let keep = args.children_keep_signals;
     let children = (0..args.children)
-        .map(|_| start_burn(args.child_run_ms, &[]))
+        .map(|_| start_burn(args.child_run_ms, &[], keep))
         .collect();
     let orphan = args
         .orphan_child_run_ms
-        .map(|run_ms| start_burn(run_ms, &[]));
-    let daemon = args.daemon.map(|how| {
+        .map(|run_ms| start_burn(run_ms, &[], keep));
+    let daemon = args.daemon.and_then(|how| {
         let how = if how == Detach::Session {
             "setsid"
         } else {
             "setpgid"
         };
-        let mut extra = vec!["--detach", how];
+        let run_ms = args.daemon_run_ms.to_string();
+        let mut extra = vec!["--launch-daemon", how, "--daemon-run-ms", &run_ms];
         if let Some(path) = &args.daemon_report {
-            extra.extend(["--report", path]);
+            extra.extend(["--daemon-report", path]);
         }
-        start_burn(args.daemon_run_ms, &extra)
+        let output = burn_command(0, &extra, keep)
+            .output()
+            .expect("burn: can't start the daemon's launcher");
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
     });
     (children, orphan, daemon)
 }
 
+/// The middle process of a daemon's start: starts the daemon with no stdin, stdout or stderr of the job's, prints
+/// its pid and exits, leaving it to init.
+#[expect(
+    clippy::zombie_processes,
+    reason = "the middle process exits at once so init adopts the daemon; waiting would defeat it"
+)]
+fn launch_daemon(args: &Args, how: Detach) -> ExitCode {
+    let how = if how == Detach::Session {
+        "setsid"
+    } else {
+        "setpgid"
+    };
+    let mut extra = vec!["--detach", how];
+    if let Some(path) = &args.daemon_report {
+        extra.extend(["--report", path]);
+    }
+    let daemon = burn_command(args.daemon_run_ms, &extra, args.children_keep_signals)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("burn: can't start the daemon");
+    println!("{}", daemon.id());
+    ExitCode::SUCCESS
+}
+
 /// Writes the ready file once the memory is touched and the spinners run: burn's pid, its children's and its
 /// resident memory so far, in the report's format.
-fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: Option<&Child>) {
+fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: Option<u32>) {
     let (process, _, _) = process_ids();
     let (_, resident_mb) = usage();
     let pid_of =
@@ -342,7 +437,7 @@ fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: O
     let text = format!(
         "pid {process}\norphan {}\ndaemon {}\nchildren {}\nresident_mb {resident_mb}\n",
         pid_of(orphan),
-        pid_of(daemon),
+        daemon.map_or_else(|| "none".into(), |pid| pid.to_string()),
         if ids.is_empty() {
             "none".into()
         } else {
@@ -357,6 +452,11 @@ fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: O
     reason = "a command-line program reports a usage error on stderr"
 )]
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE; a job's program normally doesn't, so a reader going away kills burn as it would `yes`.
+    // SAFETY: setting a signal's disposition to its default touches no memory.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args = match parse(env::args().skip(1)) {
         Ok(args) => args,
         Err(problem) => {
@@ -377,10 +477,16 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(OS_ERROR);
     }
+    if let Some(how) = args.launch_daemon {
+        return launch_daemon(&args, how);
+    }
     handle(libc::SIGTERM, args.on_term);
     handle(libc::SIGINT, args.on_int);
+    if let Some(path) = &args.armed {
+        fs::write(path, "armed\n").expect("burn: can't write the armed file");
+    }
     let started = Instant::now();
-    let (children, mut orphan, mut daemon) = start_children(&args);
+    let (children, mut orphan, daemon) = start_children(&args);
     let listener = args
         .port
         .then(|| TcpListener::bind("127.0.0.1:0").expect("burn: can't bind a port"));
@@ -392,13 +498,13 @@ fn main() -> ExitCode {
     let stop = Arc::new(AtomicBool::new(false));
     let spinners = spin(args.cpu_millicores, &stop);
     if let Some(path) = &args.ready {
-        write_ready(path, &children, orphan.as_ref(), daemon.as_ref());
+        write_ready(path, &children, orphan.as_ref(), daemon);
     }
 
     let mut reap = || {
-        // The orphan and the daemon are meant to outlive burn, so burn never waits for them, but it collects
-        // either one as soon as it has exited, so no zombie of burn's lingers in the session.
-        for left_behind in [orphan.as_mut(), daemon.as_mut()].into_iter().flatten() {
+        // The orphan is meant to outlive burn, so burn never waits for it, but it collects it as soon as it has
+        // exited, so no zombie of burn's lingers in the session. (The daemon's parent is init.)
+        if let Some(left_behind) = orphan.as_mut() {
             let _ = left_behind.try_wait();
         }
     };

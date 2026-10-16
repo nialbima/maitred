@@ -128,8 +128,9 @@ fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
 /// ends at 2 s and `x2` runs on. `h1` and `h2` wait behind them on the limit. `h1`'s supervisor is stopped from 1.9 s
 /// to 2.5 s (under the 1 s stall limit, so it still counts as waiting), so `h2` is certain to run the first pass
 /// after the slot frees. That walk admits `h1` on paper, and the limit "charged or admitted on paper" then counts
-/// `x2` and `h1`, so `h2` waits. Counting only the running jobs would let `h2` in, three at once. Each reserves 2000
-/// millicores, so the budget (8000) never decides it.
+/// `x2` and `h1`, so `h2` waits. Counting only the running jobs would let `h2` in ahead of `h1`, which
+/// `admitted_before` catches. (Admission is one pass at a time under `admit.lock`, so it can't put three in at once.)
+/// Each reserves 2000 millicores, so the budget (8000) never decides it.
 fn heavy_limit_counts_admissions_on_paper() -> Scenario {
     let mut machine = MachineConfig::for_tests();
     machine.settle = ms(0);
@@ -370,10 +371,11 @@ fn class_blocked_ticket_doesnt_drain_when_its_hold_lapses() -> Scenario {
 }
 
 /// The sampler never reads memory, so admission is the plain-lock fallback: one job at a time, "admit me only if
-/// no living ticket is charged and I am first in waiting". `b` and `c` wait behind `a`. `b`'s ticket is corrupted
-/// while it waits: until `b`'s supervisor next writes it, other readers find no valid slot and charge it at the
-/// heavy minimum. That must not keep the queue stopped for good: `b`'s next pass rewrites the ticket, and `b`
-/// and then `c` start once `a` has ended.
+/// no living ticket is charged and I am first in waiting". `b` and `c` wait behind `a`, which ends at about 1.2 s.
+/// `b`'s ticket is corrupted at 1.1 s, and `b`'s supervisor is stopped from 1.1 s to 1.8 s (inside the 1 s stall
+/// limit), so its ticket stays unreadable while `a` ends and `c` runs its passes. A locked ticket with no readable
+/// slot is charged at the heavy minimum, so `c`'s fallback sees a living charged ticket and waits: `c` can't jump
+/// `b`. Not charging it would let `c` in first. When `b` runs again it rewrites its ticket and gets in, then `c`.
 fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
     Scenario::new(
         "with no reliable load, an unreadable ticket doesn't stop the queue for good",
@@ -384,7 +386,15 @@ fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
     .arrive(ms(0), Job::new("a", Class::Light).runs_for(secs(1)))
     .arrive(ms(300), Job::new("b", Class::Light))
     .arrive(ms(600), Job::new("c", Class::Light))
-    .fault(ms(800), Fault::corrupt_ticket("b"))
+    .fault(ms(1_100), Fault::corrupt_ticket("b"))
+    .fault(
+        ms(1_100),
+        Fault::signal("b", Process::Supervisor, Signal::Stop),
+    )
+    .fault(
+        ms(1_800),
+        Fault::signal("b", Process::Supervisor, Signal::Cont),
+    )
     .expect(Expect::admitted("b"))
     .expect(Expect::admitted("c"))
     .expect(Expect::admitted_before("b", "c"))
@@ -433,7 +443,7 @@ fn with_the_sampler_down_a_due_quiet_job_gets_in_tainted() -> Scenario {
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.
 const CLASSES: &str = "\
 # name    | pattern            | class | why                                  | options
-mutation  | ^bin/mutant( |$)   | heavy | every core for hours
+mutation  | ^bin/mutant( |$)   | heavy | every core for hours                 | cpu=8 mem=6G
 specs     | ^bin/rspec( |$)    | light | its databases come from a slot       | slot=test_env
 ";
 
@@ -488,7 +498,8 @@ pub fn classification() -> Vec<ClassCase> {
             "bundle exec bin/mutant run",
         )
         .checks("r2-threat B3")
-        .expect_hook(mutant()),
+        .expect_hook(mutant())
+        .fails_until("MT-012"),
         // Command position includes "$(", "(" and "a newline", and the spotter never looks inside "a heredoc's
         // body", so a command after the body is seen.
         hook(
@@ -508,7 +519,7 @@ pub fn classification() -> Vec<ClassCase> {
         .expect_hook(mutant()),
         hook(
             "a heredoc body that mentions a heavy program",
-            "git commit -F - <<'EOF'\nrun bin/mutant run tonight\nEOF",
+            "git commit -F - <<'EOF'\nbin/mutant run tonight\nEOF",
         )
         .checks("r4-classify C2")
         .expect_hook(Hook::Allow),
@@ -535,12 +546,32 @@ pub fn classification() -> Vec<ClassCase> {
             "if bin/mutant run; then echo ok; fi",
         )
         .checks("r4-classify C4")
-        .expect_hook(mutant()),
+        .expect_hook(mutant())
+        .fails_until("MT-002"),
         hook(
             "a heavy program after while",
             "while bin/mutant run; do :; done",
         )
         .checks("r4-classify C4")
+        .expect_hook(mutant())
+        .fails_until("MT-002"),
+        // A case pattern's ")" isn't in the doc's list either (MT-002); "{" is.
+        hook(
+            "a heavy program in a case branch",
+            "case x in x) bin/mutant run;; esac",
+        )
+        .checks("r4-classify C4")
+        .expect_hook(mutant())
+        .fails_until("MT-002"),
+        hook("a heavy program in braces", "{ bin/mutant run; }")
+            .checks("r4-classify C4")
+            .expect_hook(mutant()),
+        // "&>" redirects; it doesn't end a command, and what follows "&&" is in command position.
+        hook(
+            "a heavy program after a command redirected with &>",
+            "echo hi &> log && bin/mutant run",
+        )
+        .checks("r4-classify C3")
         .expect_hook(mutant()),
         // Matching strips launchers the machine config lists, such as bundle exec, then matches the rule.
         argv("specs behind bundle exec", &["bundle", "exec", "bin/rspec"])
@@ -583,11 +614,12 @@ pub fn classification() -> Vec<ClassCase> {
         )
         .checks("r4-classify C1")
         .expect_match(MatchExpect::queued(Class::Light).slot("test_env")),
-        // "An invalid file ... makes every command heavy, with a warning naming the bad line." This rule has no
-        // why, which makes the file invalid.
+        // "An invalid file ... makes every command heavy, with a warning naming the bad line." The second rule has no
+        // why, which makes the file invalid, so even the valid first rule's program is heavy: skipping only the bad
+        // line would leave bin/rspec light.
         ClassCase::argv(
             "an invalid class file",
-            "specs | ^bin/rspec( |$) | light\n",
+            "specs | ^bin/rspec( |$) | light | runs the suite\nbroken | ^bin/x( |$) | light\n",
             &["bin/rspec"],
         )
         .checks("r2-threat A9")
@@ -609,5 +641,87 @@ pub fn classification() -> Vec<ClassCase> {
         )
         .checks("r4-classify C8")
         .expect_match(MatchExpect::queued(Class::Heavy).no_rule()),
+        // A rule after the skipped one still matches, so skipping the rest of the file isn't enough.
+        ClassCase::argv(
+            "a rule after the skipped one still matches",
+            &format!("{CLASSES}bench     | ^bin/bench( |$)    | quiet | its output is a timing\n"),
+            &["bin/bench"],
+        )
+        .checks("r4-classify C8")
+        .expect_match(MatchExpect::queued(Class::Quiet).rule("bench")),
+        // ARCHITECTURE rev 106: "a job takes at most one slot per pool", however many of its programs ask.
+        argv(
+            "two programs asking for one pool take one slot",
+            &["sh", "-c", "bin/rspec && bin/rspec"],
+        )
+        .checks("r4-classify C14")
+        .expect_match(MatchExpect::queued(Class::Light).slot("test_env")),
+        // A shell string takes "their largest reservation": mutation's cpu=8 mem=6G.
+        argv(
+            "a shell string takes its programs' largest reservation",
+            &["sh", "-c", "bin/rspec && bin/mutant run"],
+        )
+        .checks("r3-threat T12")
+        .checks("r4-classify C14")
+        .expect_match(
+            MatchExpect::queued(Class::Heavy)
+                .slot("test_env")
+                .reserves(8_000, 6_144),
+        ),
+        // The wrappers' option grammars: "nice (including -n N and -N)", "timeout and gtimeout (including -k ...)",
+        // "env (including ... -C ...)", "exec", "xargs (including ... -n ...)".
+        argv(
+            "a heavy program behind nice -5",
+            &["nice", "-5", "bin/mutant", "run"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
+        argv(
+            "a heavy program behind timeout -k",
+            &["timeout", "-k", "5", "60", "bin/mutant", "run"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
+        argv(
+            "a heavy program behind gtimeout",
+            &["gtimeout", "60", "bin/mutant", "run"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
+        argv(
+            "a heavy program behind env -C",
+            &["env", "-C", ".", "bin/mutant", "run"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
+        // "command (but not command -v or -V, which look a command up rather than run it)": the program is command
+        // itself, which no rule names.
+        argv(
+            "command -v looks a program up and doesn't run it",
+            &["command", "-v", "bin/mutant"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(MatchExpect::queued(Class::Heavy).no_rule()),
+        // A program's own options are the rule's to match; only wrappers and launchers are stripped (SK, for the
+        // doc's Matching section, 2026-10-16). So a class file that runs `make -C dir release` writes them in.
+        ClassCase::argv(
+            "a rule written for make -C matches it",
+            "release | ^make( -C [^ ]+)? +release( |$) | heavy | a full optimised build\n",
+            &["make", "-C", "app", "release"],
+        )
+        .checks("r4-classify C14")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("release")),
+        argv(
+            "a heavy program behind exec",
+            &["exec", "bin/mutant", "run"],
+        )
+        .checks("r2-threat B3")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
+        argv(
+            "a heavy program behind xargs",
+            &["xargs", "-n", "1", "bin/mutant", "run"],
+        )
+        .checks("r2-threat B3")
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
     ]
 }

@@ -9,6 +9,7 @@
 //! [`ClassCase::judge_hook`] or [`ClassCase::judge_match`] compares with the expected one.
 
 use crate::job::Class;
+use crate::machine::Amount;
 
 /// What a case feeds the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,12 +43,13 @@ impl Hook {
 /// What argv matching makes of a command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Matched {
-    /// Queued in `class`, under `rule` (`None` when no rule matched), with these slots and record flags.
+    /// Queued in `class`, under `rule` (`None` when no rule matched), with these slots, record flags and reservation.
     Queued {
         class: Class,
         rule: Option<String>,
         slots: Vec<String>,
         flags: Vec<String>,
+        reservation: Option<Amount>,
     },
     /// Refused before any ticket exists (exit 77): a `none` rule, or a keep-awake wrapper.
     Refused,
@@ -61,7 +63,25 @@ impl Matched {
             rule: None,
             slots: Vec::new(),
             flags: Vec::new(),
+            reservation: None,
         }
+    }
+
+    /// Sets the reservation matching gave the job.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal, which has no reservation.
+    #[must_use]
+    pub fn reservation(mut self, cpu_millicores: u32, mem_mb: u32) -> Self {
+        let Self::Queued { reservation, .. } = &mut self else {
+            panic!("a refusal has no reservation")
+        };
+        *reservation = Some(Amount {
+            cpu_millicores,
+            mem_mb,
+        });
+        self
     }
 
     /// Names the rule that matched.
@@ -121,14 +141,15 @@ pub enum RuleExpect {
 /// What a case expects argv matching to answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatchExpect {
-    /// Queued in `class`, under `rule`, with exactly these slots (in any order), at least the `flags` and none of
-    /// the `without_flags`.
+    /// Queued in `class`, under `rule`, with exactly these slots (in any order), at least the `flags`, none of the
+    /// `without_flags`, and the `reservation` if one is named.
     Queued {
         class: Class,
         rule: RuleExpect,
         slots: Vec<String>,
         flags: Vec<String>,
         without_flags: Vec<String>,
+        reservation: Option<Amount>,
     },
     Refused,
 }
@@ -143,7 +164,25 @@ impl MatchExpect {
             slots: Vec::new(),
             flags: Vec::new(),
             without_flags: Vec::new(),
+            reservation: None,
         }
+    }
+
+    /// Expects this reservation: the strictest class's, or the largest of the programs a shell string runs.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn reserves(mut self, cpu_millicores: u32, mem_mb: u32) -> Self {
+        let Self::Queued { reservation, .. } = &mut self else {
+            panic!("a refusal has no reservation")
+        };
+        *reservation = Some(Amount {
+            cpu_millicores,
+            mem_mb,
+        });
+        self
     }
 
     #[must_use]
@@ -238,12 +277,14 @@ impl MatchExpect {
                     slots,
                     flags,
                     without_flags,
+                    reservation,
                 },
                 Matched::Queued {
                     class: actual_class,
                     rule: actual_rule,
                     slots: actual_slots,
                     flags: actual_flags,
+                    reservation: actual_reservation,
                 },
             ) => {
                 let rule_ok = match rule {
@@ -262,6 +303,7 @@ impl MatchExpect {
                     && without_flags
                         .iter()
                         .all(|flag| !actual_flags.contains(flag))
+                    && reservation.is_none_or(|amount| *actual_reservation == Some(amount))
             }
             _ => false,
         }
@@ -298,6 +340,9 @@ pub struct ClassCase {
     pub pools: Vec<String>,
     pub input: Input,
     pub expected: Option<Expected>,
+    /// The triage entry tracking why this case fails against the doc as it stands. A runner reports such a case's
+    /// failure as known and its passing as news: the entry may be ready to close.
+    pub known_gap: Option<String>,
 }
 
 impl ClassCase {
@@ -325,6 +370,7 @@ impl ClassCase {
             pools: Vec::new(),
             input,
             expected: None,
+            known_gap: None,
         }
     }
 
@@ -332,6 +378,13 @@ impl ClassCase {
     #[must_use]
     pub fn checks(mut self, finding: &str) -> Self {
         self.findings.push(finding.into());
+        self
+    }
+
+    /// Marks the case as failing until the triage entry `entry` is fixed.
+    #[must_use]
+    pub fn fails_until(mut self, entry: &str) -> Self {
+        self.known_gap = Some(entry.into());
         self
     }
 

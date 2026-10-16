@@ -427,3 +427,131 @@ fn the_ready_file_comes_after_the_memory_is_touched_and_names_the_daemon() {
         "the ready file came before the memory was touched: {pids:?}"
     );
 }
+
+#[test]
+fn a_handled_term_ends_the_memory_fill_promptly() {
+    let armed = report_path("armed");
+    let mut child = burn(&[
+        "--run-ms",
+        "20000",
+        "--mem-mb",
+        "1500",
+        "--on-term",
+        "exit",
+        "--armed",
+        armed.to_str().unwrap(),
+    ])
+    .spawn()
+    .expect("burn didn't start");
+    wait_for(&armed, 2_000);
+    let sent = Instant::now();
+    signal(&child, "TERM");
+    let status = child.wait().expect("burn didn't finish");
+
+    assert_eq!(status.code(), Some(0));
+    assert!(
+        sent.elapsed() < millis(300),
+        "TERM took {:?} to end the fill",
+        sent.elapsed()
+    );
+}
+
+#[test]
+fn a_reader_that_goes_away_kills_it_by_sigpipe_as_it_would_any_program() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_burn"))
+        .args(["--run-ms", "3000", "--print-every-ms", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("burn didn't start");
+    drop(child.stdout.take());
+    let status = child.wait().expect("burn didn't finish");
+
+    assert_eq!(status.signal(), Some(13), "{status:?}");
+}
+
+#[test]
+fn children_can_keep_its_ignored_term_as_a_nohup_child_would() {
+    let ready = report_path("keep-signals");
+    let mut parent = burn(&[
+        "--run-ms",
+        "3000",
+        "--on-term",
+        "ignore",
+        "--children-keep-signals",
+        "--orphan-child-run-ms",
+        "5000",
+        "--ready",
+        ready.to_str().unwrap(),
+    ])
+    .spawn()
+    .expect("burn didn't start");
+    let orphan = ready_pids(&ready)
+        .get("orphan")
+        .cloned()
+        .expect("no orphan in the ready file");
+
+    Command::new("kill")
+        .args(["-TERM", &orphan])
+        .status()
+        .expect("kill didn't run");
+    thread::sleep(millis(300));
+
+    assert!(alive(&orphan), "the child didn't keep the ignored TERM");
+    let _ = Command::new("kill").args(["-KILL", &orphan]).status();
+    let _ = parent.kill();
+    let _ = parent.wait();
+}
+
+#[test]
+fn a_daemon_is_not_burns_child() {
+    let path = report_path("daemon-parent");
+    let daemon_path = report_path("daemon-parent-daemon");
+    burn(&[
+        "--run-ms",
+        "20",
+        "--daemon",
+        "setsid",
+        "--daemon-run-ms",
+        "300",
+        "--daemon-report",
+        daemon_path.to_str().unwrap(),
+        "--report",
+        path.to_str().unwrap(),
+    ])
+    .status()
+    .expect("burn didn't start");
+    wait_for(&daemon_path, 3_000);
+
+    let parent = read_report(&path);
+    let daemon = read_report(&daemon_path);
+    let daemon_parent = daemon.get("ppid").expect("no ppid in the daemon's report");
+    assert_ne!(
+        Some(daemon_parent),
+        parent.get("pid"),
+        "the daemon is burn's own child"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_the_report_gives_a_physical_footprint_that_covers_the_memory() {
+    let path = report_path("footprint");
+    burn(&[
+        "--run-ms",
+        "50",
+        "--mem-mb",
+        "64",
+        "--report",
+        path.to_str().unwrap(),
+    ])
+    .status()
+    .expect("burn didn't start");
+
+    let footprint: u64 = read_report(&path)
+        .get("peak_footprint_mb")
+        .expect("no peak_footprint_mb in the report")
+        .parse()
+        .expect("not a number");
+    assert!(footprint >= 64, "footprint {footprint} MB, asked for 64");
+}

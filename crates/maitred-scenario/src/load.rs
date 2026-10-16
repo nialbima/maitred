@@ -87,15 +87,16 @@ pub struct Running<'a> {
     /// Whether its holder's figure reaches the sample. An unmeasured job counts in the machine's figures but
     /// isn't listed under `jobs`, so admission charges it its whole reservation.
     pub measured: bool,
-    /// Its running threads, summed into `maitred_running_threads` when it is measured.
-    pub threads: u32,
+    /// Its running threads in thousandths, summed into `maitred_running_threads` when it is measured. By default its
+    /// CPU use: a job using 1100 millicores has about 1.1 threads running.
+    pub threads_milli: u32,
 }
 
 impl<'a> Running<'a> {
-    /// Sets its running threads.
+    /// Sets its running threads, in whole threads.
     #[must_use]
     pub fn threads(mut self, threads: u32) -> Self {
-        self.threads = threads;
+        self.threads_milli = threads.saturating_mul(1_000);
         self
     }
 
@@ -105,7 +106,7 @@ impl<'a> Running<'a> {
             label,
             uses,
             measured: true,
-            threads: uses.cpu_millicores.div_ceil(1_000),
+            threads_milli: uses.cpu_millicores,
         }
     }
 
@@ -115,7 +116,7 @@ impl<'a> Running<'a> {
             label,
             uses,
             measured: false,
-            threads: uses.cpu_millicores.div_ceil(1_000),
+            threads_milli: uses.cpu_millicores,
         }
     }
 }
@@ -155,6 +156,8 @@ pub struct Publisher {
     woke_at: Option<Ms>,
     /// When the previous sample was taken, where this sample's interval begins.
     previous: Option<Ms>,
+    /// A gap since the previous sample longer than this restarts every streak.
+    load_freshness: Ms,
     /// Whether the CPU-kill streak counts maitred's running threads per core while the CPU is saturated, as on
     /// macOS, rather than pressure (ARCHITECTURE.md, Kill policy step 1).
     threads_for_cpu_streak: bool,
@@ -174,6 +177,7 @@ impl Publisher {
             gpu_kill_ceiling: machine.gpu_kill_ceiling_permille,
             woke_at: None,
             previous: None,
+            load_freshness: machine.load_freshness,
             threads_for_cpu_streak: false,
             quiet_streak: 0,
             over_cpu_streak: 0,
@@ -205,36 +209,48 @@ impl Publisher {
         running: &[Running<'_>],
         victim_gone: Option<Ms>,
     ) -> Published {
-        let job_cpu: u32 = running.iter().map(|job| job.uses.cpu_millicores).sum();
+        let job_cpu = running.iter().fold(0_u32, |sum, job| {
+            sum.saturating_add(job.uses.cpu_millicores)
+        });
         let job_mem: u32 = running.iter().map(|job| job.uses.mem_mb).sum();
-        let demand = sample.cpu_demand_millicores + job_cpu;
+        let demand = sample.cpu_demand_millicores.saturating_add(job_cpu);
         let pressure = permille(demand, self.capacity.cpu_millicores);
         let woke = sample.woke_at.is_some();
         if woke {
             self.woke_at = sample.woke_at;
         }
         let began = self.previous.unwrap_or(sample.at - self.interval);
+        // A gap longer than load_freshness, whether the sampler restarted or stalled, is no evidence of anything, so
+        // every streak starts again (ARCHITECTURE.md, Kill policy step 1).
+        let gap = sample.at - began > self.load_freshness;
         self.previous = Some(sample.at);
-        let counts_for_kill = !woke && victim_gone.is_none_or(|gone| began > gone);
+        let counts_for_kill = !woke && !gap && victim_gone.is_none_or(|gone| began > gone);
         let pressure_read = !sample.missing.contains(&Reading::CpuPressure);
+        let cpu_read = !sample.missing.contains(&Reading::Cpu);
+        let capacity = u64::from(self.capacity.cpu_millicores);
+        // Comparisons are exact: demand per core over a ceiling in thousandths, without rounding the quotient.
+        let per_core_over =
+            |amount: u32, ceiling: u32| u64::from(amount) * 1_000 > u64::from(ceiling) * capacity;
         let gpu_read = !sample.missing.contains(&Reading::Gpu);
 
-        self.quiet_streak = if woke || !pressure_read || pressure >= self.quiet_threshold {
+        let quiet = u64::from(demand) * 1_000 < u64::from(self.quiet_threshold) * capacity;
+        self.quiet_streak = if woke || gap || !pressure_read || !quiet {
             0
         } else {
             self.quiet_streak + 1
         };
-        let measured_threads: u32 = running
+        let measured_threads_milli = running
             .iter()
             .filter(|job| job.measured)
-            .map(|job| job.threads)
-            .sum();
+            .fold(0_u32, |sum, job| sum.saturating_add(job.threads_milli));
         let over_cpu = if self.threads_for_cpu_streak {
-            demand >= self.capacity.cpu_millicores
-                && permille(measured_threads * 1_000, self.capacity.cpu_millicores)
-                    > self.cpu_kill_ceiling
+            // macOS: maitred's own running threads per core, counted only while CPU use is known and at capacity.
+            cpu_read
+                && demand >= self.capacity.cpu_millicores
+                && u64::from(measured_threads_milli)
+                    > u64::from(self.cpu_kill_ceiling) * capacity / 1_000
         } else {
-            pressure_read && pressure > self.cpu_kill_ceiling
+            pressure_read && per_core_over(demand, self.cpu_kill_ceiling)
         };
         self.over_cpu_streak = if counts_for_kill && over_cpu {
             self.over_cpu_streak + 1
@@ -261,7 +277,7 @@ impl Publisher {
                 .mem_mb
                 .saturating_sub(sample.mem_used_mb + job_mem),
             gpu_permille: sample.gpu_permille,
-            maitred_running_threads: measured_threads,
+            maitred_running_threads: measured_threads_milli.saturating_add(500) / 1_000,
             quiet_streak: self.quiet_streak,
             over_cpu_streak: self.over_cpu_streak,
             over_gpu_streak: self.over_gpu_streak,

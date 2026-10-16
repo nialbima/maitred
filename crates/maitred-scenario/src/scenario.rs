@@ -39,6 +39,12 @@ pub enum Invalid {
     UndeclaredPool { label: String, pool: String },
     /// An `at_most_together` allows as many jobs as it names, so it can never fail.
     CantFail { allowed: usize, jobs: usize },
+    /// Two expectations about one job can't both hold.
+    Contradicts(String),
+    /// An expectation that a job never starts needs `run_until`, since that job never ends.
+    NeedsAnEnd,
+    /// The run stops before a time an expectation names, so the expectation can't be judged.
+    StopsBeforeExpectation { until: Ms, named: Ms },
     /// The run stops before its last event.
     StopsBeforeLastEvent { until: Ms, last: Ms },
     /// A sampler outage ends no later than it starts.
@@ -65,7 +71,9 @@ pub struct Scenario {
     pub machine: MachineConfig,
     /// The background load, sample by sample, in time order. Between two samples the earlier one holds.
     pub trace: Vec<Sample>,
-    /// What happens, in the order it happens.
+    /// What happens, in the order it happens. Events at one moment happen in the order they were added. Both
+    /// targets publish the moment's load sample (the trace's sample due then, if the sampler is up) before any
+    /// event at that moment, so a job arriving at 0 meets a load file, not the no-load fallback.
     pub events: Vec<(Ms, Event)>,
     pub expectations: Vec<Expect>,
     /// When the run stops. `None` means once every job that started has ended and no event is left. A scenario
@@ -260,11 +268,54 @@ impl Scenario {
                 }
             }
         }
+        problems.extend(self.contradictions());
         if problems.is_empty() {
             Ok(())
         } else {
             Err(problems)
         }
+    }
+
+    /// Expectations that can't all hold, or can't be judged within the run.
+    fn contradictions(&self) -> Vec<Invalid> {
+        let mut problems = Vec::new();
+        let has = |wanted: &Expect| self.expectations.contains(wanted);
+        for expectation in &self.expectations {
+            match expectation {
+                Expect::NeverAdmitted(label) => {
+                    let admitted = self.expectations.iter().any(|other| {
+                        matches!(other, Expect::Admitted(l) | Expect::AdmittedBy { label: l, .. } if l == label)
+                    });
+                    if admitted {
+                        problems.push(Invalid::Contradicts(label.clone()));
+                    }
+                    if self.until.is_none() {
+                        problems.push(Invalid::NeedsAnEnd);
+                    }
+                }
+                Expect::AdmittedBefore { first, second } if first < second => {
+                    if has(&Expect::admitted_before(second, first)) {
+                        problems.push(Invalid::Contradicts(first.clone()));
+                    }
+                }
+                Expect::Killed { label, .. } if has(&Expect::not_killed(label)) => {
+                    problems.push(Invalid::Contradicts(label.clone()));
+                }
+                Expect::AdmittedBy { by: named, .. }
+                | Expect::NotAdmittedBefore { before: named, .. } => {
+                    if let Some(until) = self.until
+                        && until < *named
+                    {
+                        problems.push(Invalid::StopsBeforeExpectation {
+                            until,
+                            named: *named,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        problems
     }
 
     /// Every expectation `outcome` breaks.
