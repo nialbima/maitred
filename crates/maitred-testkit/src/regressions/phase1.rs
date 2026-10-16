@@ -670,8 +670,9 @@ fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
     .run_until(secs(4))
 }
 
-/// MT-043 (Nick, 2026-10-16; the doc's wording is to come): a holder whose passes have gone stale stops being a
-/// candidate, so a stopped victim's holder can't hold up the kill policy. `y` and `x` are heavy, each using 2000 MB
+/// MT-043 (ARCHITECTURE rev 168): a running job whose holder hasn't passed within the stall limit isn't a kill
+/// candidate, so a stopped victim's holder can't hold up the kill policy. The holder is stopped before the breach,
+/// not during it, so its own holder can't act first and the run doesn't depend on who chooses first. `y` and `x` are heavy, each using 2000 MB
 /// of a 2048 MB reservation, so neither is over and the victim is the most recently admitted heavy job: `x`,
 /// admitted at about 1 s. `x`'s holder is stopped at 1.5 s. Outside load reaches 12000 MB at 2 s: 16384 - 12000 -
 /// 4000 = 384 MB available, under `kill_floor`. With no candidate over, the name `x` stands (Rule B) while `x` is a
