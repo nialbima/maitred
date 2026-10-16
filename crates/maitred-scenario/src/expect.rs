@@ -40,6 +40,8 @@ pub enum Failure {
     AdmittedTwice(String),
     /// The outcome reports one job ended twice.
     EndedTwice(String),
+    /// The outcome reports one job chosen as a victim twice.
+    KilledTwice(String),
     /// The outcome reports a job ending before it was admitted, or without being admitted.
     EndedBeforeAdmitted(String),
     NotBefore {

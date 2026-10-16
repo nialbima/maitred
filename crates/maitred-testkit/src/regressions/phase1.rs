@@ -125,10 +125,11 @@ fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
 }
 
 /// Settle is 0 here, so it can't hide the class limit. `x1` and `x2` (heavy) fill `max_running.heavy` = 2; `x1`
-/// ends at 2 s and `x2` runs on. `h1` and `h2` wait behind them on the limit. When `x1` ends, one slot is free:
-/// whichever of `h1` and `h2` runs its pass first, the walk admits `h1` on paper, and the limit "charged or
-/// admitted on paper" then counts `x2` and `h1`, so `h2` waits. Counting only the running jobs would let `h2` in
-/// too, three at once. Each reserves 2000 millicores, so the budget (8000) never decides it.
+/// ends at 2 s and `x2` runs on. `h1` and `h2` wait behind them on the limit. `h1`'s supervisor is stopped from 1.9 s
+/// to 2.5 s (under the 1 s stall limit, so it still counts as waiting), so `h2` is certain to run the first pass
+/// after the slot frees. That walk admits `h1` on paper, and the limit "charged or admitted on paper" then counts
+/// `x2` and `h1`, so `h2` waits. Counting only the running jobs would let `h2` in, three at once. Each reserves 2000
+/// millicores, so the budget (8000) never decides it.
 fn heavy_limit_counts_admissions_on_paper() -> Scenario {
     let mut machine = MachineConfig::for_tests();
     machine.settle = ms(0);
@@ -146,6 +147,14 @@ fn heavy_limit_counts_admissions_on_paper() -> Scenario {
     .arrive(ms(200), heavy("x2", secs(10)))
     .arrive(ms(500), heavy("h1", secs(3)))
     .arrive(ms(800), heavy("h2", secs(3)))
+    .fault(
+        ms(1_900),
+        Fault::signal("h1", Process::Supervisor, Signal::Stop),
+    )
+    .fault(
+        ms(2_500),
+        Fault::signal("h1", Process::Supervisor, Signal::Cont),
+    )
     .expect(Expect::at_most_together(2, &["x1", "x2", "h1", "h2"]))
     .expect(Expect::admitted_before("h1", "h2"))
     .expect(Expect::admitted("h2"))
@@ -301,11 +310,13 @@ fn due_quiet_job_isnt_held_off_by_an_orphan() -> Scenario {
 }
 
 /// Outside load holds 8000 MB, so only 8384 is free and neither `w1` nor `w2` (9000 MB each) fits; first-in never
-/// waives memory. The machine sleeps from 1.5 s to 9.5 s, longer than the stall limit (1 s), and the outside load
-/// is gone when it wakes, so there is room for exactly one of them at the moment of waking: 16384 - 9000 = 7384 is
-/// left for the other. Every waiter's last pass is then 8 s old, but "nobody is judged stalled ... until the stall
-/// limit has passed since the machine last woke", so whichever supervisor runs its first pass after waking, `w1`
-/// gets the room and `w2` waits for it.
+/// waives memory. The machine sleeps from 1.5 s to 9.5 s and the outside load is gone when it wakes, leaving room for
+/// exactly one of them (16384 - 9000 = 7384 is left for the other). The first sample after waking isn't fresh, so
+/// the first passes run the plain-lock fallback; the stall rule matters on the passes after it. `w1`'s supervisor is
+/// stopped from 1.4 s to 10 s, so on those passes `w1`'s last pass is more than 8 s old and `w2` is certain to look
+/// first. "Nobody is judged stalled ... until the stall limit has passed since the machine last woke" (1 s, so
+/// 10.5 s), so `w2` still sees `w1` ahead, and `w1` gets the room once it runs again. Judging `w1` stalled would
+/// let `w2` jump it.
 fn nobody_jumps_the_queue_after_the_machine_wakes() -> Scenario {
     Scenario::new(
         "after the machine wakes, no waiter is skipped as stalled",
@@ -322,7 +333,15 @@ fn nobody_jumps_the_queue_after_the_machine_wakes() -> Scenario {
             .runs_for(secs(1)),
     )
     .arrive(ms(500), Job::new("w2", Class::Light).reserves(1_000, 9_000))
+    .fault(
+        ms(1_400),
+        Fault::signal("w1", Process::Supervisor, Signal::Stop),
+    )
     .sleep(ms(1_500), ms(9_500))
+    .fault(
+        ms(10_000),
+        Fault::signal("w1", Process::Supervisor, Signal::Cont),
+    )
     .expect(Expect::admitted_before("w1", "w2"))
     .expect(Expect::never_together("w1", "w2"))
 }

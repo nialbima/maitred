@@ -112,6 +112,7 @@ pub fn now_json(published: &Published, written: &Written<'_>) -> String {
     readings(&mut json, published, written.platform);
     jobs(&mut json, published, written);
     if written.platform == Platform::MacOs {
+        // Sleep assertions aren't modelled in scenarios; written as none.
         json.push_str("\"sleep_assertions\":{\"count\":0,\"unexpected\":0},");
     }
     let missing: Vec<String> = published

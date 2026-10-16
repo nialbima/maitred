@@ -106,12 +106,13 @@ impl Outcome {
         Some((start, end))
     }
 
-    /// Entries no run can have, whatever the scenario expects: a job admitted or ended twice, or ended before it
-    /// was admitted. ARCHITECTURE has one admission and one record per ticket.
+    /// Entries no run can have, whatever the scenario expects: a job admitted, ended or killed twice, or ended
+    /// before it was admitted. ARCHITECTURE has one admission, one record and at most one kill per ticket.
     pub(crate) fn impossible(&self) -> Vec<crate::expect::Failure> {
         use crate::expect::Failure;
         let mut labels: Vec<&str> = self.admissions.iter().map(|(l, _)| l.as_str()).collect();
         labels.extend(self.ends.iter().map(|(l, _, _)| l.as_str()));
+        labels.extend(self.kills.iter().map(|(l, _, _)| l.as_str()));
         labels.sort_unstable();
         labels.dedup();
         let mut failures = Vec::new();
@@ -122,10 +123,18 @@ impl Outcome {
             if self.ends.iter().filter(|(l, _, _)| l == label).count() > 1 {
                 failures.push(Failure::EndedTwice(label.into()));
             }
-            if let Some((_, _, ended)) = self.ends.iter().find(|(l, _, _)| l == label)
+            if self.kills.iter().filter(|(l, _, _)| l == label).count() > 1 {
+                failures.push(Failure::KilledTwice(label.into()));
+            }
+            if let Some(ended) = self
+                .ends
+                .iter()
+                .filter(|(l, _, _)| l == label)
+                .map(|(_, _, at)| *at)
+                .min()
                 && self
                     .admitted_at(label)
-                    .is_none_or(|admitted| *ended < admitted)
+                    .is_none_or(|admitted| ended < admitted)
             {
                 failures.push(Failure::EndedBeforeAdmitted(label.into()));
             }

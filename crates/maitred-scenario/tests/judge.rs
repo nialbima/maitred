@@ -391,3 +391,34 @@ fn a_record_missing_the_expected_flag_fails() {
         }])
     );
 }
+
+#[test]
+fn a_job_killed_twice_is_a_failure() {
+    let scenario = two_heavy_jobs().expect(Expect::killed("a", Trigger::Memory));
+    let outcome = Outcome::new()
+        .admitted("a", ms(0))
+        .killed("a", Trigger::Memory, ms(1_000))
+        .killed("a", Trigger::Cpu, ms(1_500));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::KilledTwice("a".into())])
+    );
+}
+
+#[test]
+fn an_end_before_admission_is_found_by_the_earliest_end_whatever_the_order_reported() {
+    let scenario = two_heavy_jobs();
+    let outcome = Outcome::new()
+        .admitted("a", ms(1_000))
+        .ended_at("a", End::Cancelled, ms(2_000))
+        .ended_at("a", End::Cancelled, ms(500));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![
+            Failure::EndedTwice("a".into()),
+            Failure::EndedBeforeAdmitted("a".into())
+        ])
+    );
+}

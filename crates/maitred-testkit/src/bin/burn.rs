@@ -17,8 +17,9 @@
 //! its default action. With `--exit` on a signal, it still waits for the children it started (not the orphan or
 //! the daemon) before it exits.
 //!
-//! `--ready PATH` is written once the signal handlers are in and every child has started. It lists `pid`,
-//! `orphan` and `children` in the report's format, so a test or the runner signals `burn` only once it is ready.
+//! `--ready PATH` is written once the signal handlers are in, every child has started, the memory is touched and the
+//! spinners run. It lists `pid`, `orphan`, `daemon`, `children` and `resident_mb` in the report's format, so a test
+//! or the runner signals or measures `burn` only once it is ready.
 //!
 //! Exits 64 on an argument it doesn't know or `--print-every-ms 0`, and 71 if `setsid` or `setpgid` fails.
 
@@ -330,13 +331,18 @@ fn start_children(args: &Args) -> (Vec<Child>, Option<Child>, Option<Child>) {
     (children, orphan, daemon)
 }
 
-/// Writes the ready file: burn's pid and its children's, in the report's format.
-fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>) {
+/// Writes the ready file once the memory is touched and the spinners run: burn's pid, its children's and its
+/// resident memory so far, in the report's format.
+fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: Option<&Child>) {
     let (process, _, _) = process_ids();
+    let (_, resident_mb) = usage();
+    let pid_of =
+        |child: Option<&Child>| child.map_or_else(|| "none".into(), |c| c.id().to_string());
     let ids: Vec<String> = children.iter().map(|c| c.id().to_string()).collect();
     let text = format!(
-        "pid {process}\norphan {}\nchildren {}\n",
-        orphan.map_or_else(|| "none".into(), |o| o.id().to_string()),
+        "pid {process}\norphan {}\ndaemon {}\nchildren {}\nresident_mb {resident_mb}\n",
+        pid_of(orphan),
+        pid_of(daemon),
         if ids.is_empty() {
             "none".into()
         } else {
@@ -375,16 +381,6 @@ fn main() -> ExitCode {
     handle(libc::SIGINT, args.on_int);
     let started = Instant::now();
     let (children, mut orphan, mut daemon) = start_children(&args);
-    if let Some(path) = &args.ready {
-        write_ready(path, &children, orphan.as_ref());
-    }
-    let mut reap = || {
-        // The orphan and the daemon are meant to outlive burn, so burn never waits for them, but it collects
-        // either one as soon as it has exited, so no zombie of burn's lingers in the session.
-        for left_behind in [orphan.as_mut(), daemon.as_mut()].into_iter().flatten() {
-            let _ = left_behind.try_wait();
-        }
-    };
     let listener = args
         .port
         .then(|| TcpListener::bind("127.0.0.1:0").expect("burn: can't bind a port"));
@@ -395,7 +391,17 @@ fn main() -> ExitCode {
     let memory = touch(args.mem_mb);
     let stop = Arc::new(AtomicBool::new(false));
     let spinners = spin(args.cpu_millicores, &stop);
+    if let Some(path) = &args.ready {
+        write_ready(path, &children, orphan.as_ref(), daemon.as_ref());
+    }
 
+    let mut reap = || {
+        // The orphan and the daemon are meant to outlive burn, so burn never waits for them, but it collects
+        // either one as soon as it has exited, so no zombie of burn's lingers in the session.
+        for left_behind in [orphan.as_mut(), daemon.as_mut()].into_iter().flatten() {
+            let _ = left_behind.try_wait();
+        }
+    };
     let end = millis(args.run_ms);
     let mut tick = 0_u64;
     loop {

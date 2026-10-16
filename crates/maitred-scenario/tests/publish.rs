@@ -244,3 +244,35 @@ fn a_missing_gpu_reading_counts_toward_no_gpu_streak() {
 
     assert_eq!(unread.over_gpu_streak, 0);
 }
+
+#[test]
+fn on_macos_the_cpu_streak_counts_maitreds_running_threads_while_the_cpu_is_saturated() {
+    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    // 40 threads on 8 cores is 5 per core, over the kill ceiling of 4, and the jobs saturate the CPU.
+    let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
+    // The same threads with the CPU not saturated don't count.
+    let idle_cpu = [Running::measured("a", job(2_000, 0)).threads(40)];
+
+    let saturated = publisher.publish(&Sample::at(ms(200)), &busy, None);
+    let unsaturated = publisher.publish(&Sample::at(ms(400)), &idle_cpu, None);
+
+    assert_eq!(
+        (saturated.over_cpu_streak, unsaturated.over_cpu_streak),
+        (1, 0)
+    );
+}
+
+#[test]
+fn a_missing_pressure_reading_publishes_no_made_up_figure() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(
+        &Sample::at(ms(200))
+            .background(40_000, 0)
+            .missing(Reading::CpuPressure),
+        &[],
+        None,
+    );
+
+    assert_eq!(load_file.cpu_pressure_permille, 0);
+}

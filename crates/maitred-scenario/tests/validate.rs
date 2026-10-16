@@ -258,3 +258,15 @@ fn a_sampler_outage_that_ends_before_it_starts_is_refused() {
         }])
     );
 }
+
+#[test]
+fn never_together_naming_one_job_twice_is_refused() {
+    let scenario = Scenario::new("a job never together with itself", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .expect(Expect::never_together("a", "a"));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::DuplicateLabel("a".into())])
+    );
+}

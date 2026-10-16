@@ -360,3 +360,70 @@ fn printing_every_zero_milliseconds_is_refused() {
 
     assert_eq!(status.code(), Some(64));
 }
+
+#[test]
+fn an_ignored_int_isnt_passed_on_to_the_children_it_starts() {
+    let ready = report_path("ignore-int-inherit");
+    let mut parent = burn(&[
+        "--run-ms",
+        "3000",
+        "--on-int",
+        "ignore",
+        "--orphan-child-run-ms",
+        "5000",
+        "--ready",
+        ready.to_str().unwrap(),
+    ])
+    .spawn()
+    .expect("burn didn't start");
+    let orphan = ready_pids(&ready)
+        .get("orphan")
+        .cloned()
+        .expect("no orphan in the ready file");
+
+    let killed = Command::new("kill")
+        .args(["-INT", &orphan])
+        .status()
+        .expect("kill didn't run");
+    thread::sleep(millis(300));
+
+    assert!(killed.success());
+    assert!(!alive(&orphan), "the child kept burn's ignored INT");
+    let _ = parent.kill();
+    let _ = parent.wait();
+}
+
+#[test]
+fn the_ready_file_comes_after_the_memory_is_touched_and_names_the_daemon() {
+    let ready = report_path("ready-late");
+    let daemon_report = report_path("ready-late-daemon");
+    let mut parent = burn(&[
+        "--run-ms",
+        "1000",
+        "--mem-mb",
+        "64",
+        "--daemon",
+        "setsid",
+        "--daemon-run-ms",
+        "200",
+        "--daemon-report",
+        daemon_report.to_str().unwrap(),
+        "--ready",
+        ready.to_str().unwrap(),
+    ])
+    .spawn()
+    .expect("burn didn't start");
+    let pids = ready_pids(&ready);
+    let _ = parent.wait();
+
+    assert!(
+        pids.get("daemon").is_some_and(|pid| pid != "none"),
+        "no daemon in {pids:?}"
+    );
+    assert!(
+        pids.get("resident_mb")
+            .and_then(|mb| mb.parse::<u64>().ok())
+            .is_some_and(|mb| mb >= 64),
+        "the ready file came before the memory was touched: {pids:?}"
+    );
+}

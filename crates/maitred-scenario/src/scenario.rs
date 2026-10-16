@@ -240,6 +240,11 @@ impl Scenario {
             problems.push(Invalid::StopsBeforeLastEvent { until, last: *last });
         }
         for expectation in &self.expectations {
+            if let Expect::NeverTogether { first, second } = expectation
+                && first == second
+            {
+                problems.push(Invalid::DuplicateLabel(first.clone()));
+            }
             if let Expect::AtMostTogether { allowed, labels } = expectation {
                 let mut seen = HashSet::new();
                 for label in labels {
