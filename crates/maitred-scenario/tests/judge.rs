@@ -422,3 +422,67 @@ fn an_end_before_admission_is_found_by_the_earliest_end_whatever_the_order_repor
         ])
     );
 }
+
+#[test]
+fn one_of_the_named_jobs_killed_in_time_passes() {
+    let scenario = two_heavy_jobs().expect(Expect::one_killed_by(
+        &["a", "b"],
+        Trigger::Memory,
+        ms(13_000),
+    ));
+    let outcome = Outcome::new().killed("b", Trigger::Memory, ms(12_000));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn none_of_the_named_jobs_killed_in_time_fails() {
+    let scenario = two_heavy_jobs().expect(Expect::one_killed_by(
+        &["a", "b"],
+        Trigger::Memory,
+        ms(13_000),
+    ));
+    let outcome = Outcome::new().killed("a", Trigger::Memory, ms(14_000));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::NoneKilledBy {
+            labels: vec!["a".into(), "b".into()],
+            trigger: Trigger::Memory,
+            by: ms(13_000)
+        }])
+    );
+}
+
+#[test]
+fn a_named_job_killed_for_another_trigger_doesnt_count() {
+    let scenario = two_heavy_jobs().expect(Expect::one_killed_by(
+        &["a", "b"],
+        Trigger::Memory,
+        ms(13_000),
+    ));
+    let outcome = Outcome::new().killed("a", Trigger::Cpu, ms(12_000));
+
+    assert!(scenario.judge(&outcome).is_err());
+}
+
+#[test]
+fn both_named_jobs_killed_in_time_fails() {
+    let scenario = two_heavy_jobs().expect(Expect::one_killed_by(
+        &["a", "b"],
+        Trigger::Memory,
+        ms(13_000),
+    ));
+    let outcome = Outcome::new()
+        .killed("a", Trigger::Memory, ms(12_000))
+        .killed("b", Trigger::Memory, ms(12_500));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::TooManyKills {
+            trigger: Trigger::Memory,
+            allowed: 1,
+            killed: 2
+        }])
+    );
+}

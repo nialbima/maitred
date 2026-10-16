@@ -23,6 +23,9 @@ pub struct Job {
     /// What it actually uses while it runs. The simulator reports it as measured; the real target's
     /// `burn` uses it.
     pub uses: Amount,
+    /// Every `period` of scenario time, from 0, it switches between `uses` and this, starting with `uses`; `None`
+    /// means it uses `uses` all run. Two jobs given the same pair in opposite order are in opposite phase.
+    pub alternate: Option<(Ms, Amount)>,
     /// How long it runs once started, if nothing stops it.
     pub runs_for: Ms,
     /// The status it exits with when it finishes on its own.
@@ -47,6 +50,7 @@ impl Job {
                 cpu_millicores: 100,
                 mem_mb: 64,
             },
+            alternate: None,
             runs_for: secs(1),
             exit_status: 0,
             measured: true,
@@ -79,6 +83,29 @@ impl Job {
             mem_mb,
         };
         self
+    }
+
+    /// Makes it switch to using `cpu_millicores` and `mem_mb` every other `period` of scenario time, so which of two
+    /// near-tied jobs is further over its reservation flips from sample to sample.
+    #[must_use]
+    pub fn alternates_with(mut self, period: Ms, cpu_millicores: u32, mem_mb: u32) -> Self {
+        self.alternate = Some((
+            period,
+            Amount {
+                cpu_millicores,
+                mem_mb,
+            },
+        ));
+        self
+    }
+
+    /// What it uses at scenario time `at`, for the target to pass the publisher as a [`crate::Running`].
+    #[must_use]
+    pub fn uses_at(&self, at: Ms) -> Amount {
+        match self.alternate {
+            Some((period, other)) if period.0 > 0 && (at.0 / period.0) % 2 == 1 => other,
+            _ => self.uses,
+        }
     }
 
     /// Sets how long it runs once started.

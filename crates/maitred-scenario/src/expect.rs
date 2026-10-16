@@ -23,6 +23,13 @@ pub enum Expect {
     AtMostTogether { allowed: usize, labels: Vec<String> },
     /// The job is chosen as a victim for `trigger`.
     Killed { label: String, trigger: Trigger },
+    /// Exactly one of these jobs is chosen as a victim for `trigger`, at or before `by`: for near-tied jobs, where
+    /// which one goes depends on which holder chooses first.
+    OneKilledBy {
+        labels: Vec<String>,
+        trigger: Trigger,
+        by: Ms,
+    },
     /// The job is never chosen as a victim.
     NotKilled(String),
     /// No more than `allowed` victims are chosen for `trigger` in the whole run.
@@ -77,6 +84,11 @@ pub enum Failure {
         trigger: Trigger,
     },
     Killed(String),
+    NoneKilledBy {
+        labels: Vec<String>,
+        trigger: Trigger,
+        by: Ms,
+    },
     TooManyKills {
         trigger: Trigger,
         allowed: usize,
@@ -157,6 +169,15 @@ impl Expect {
     }
 
     #[must_use]
+    pub fn one_killed_by(labels: &[&str], trigger: Trigger, by: Ms) -> Self {
+        Self::OneKilledBy {
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            trigger,
+            by,
+        }
+    }
+
+    #[must_use]
     pub fn not_killed(label: &str) -> Self {
         Self::NotKilled(label.into())
     }
@@ -188,7 +209,9 @@ impl Expect {
             | Self::Killed { label, .. }
             | Self::Ends { label, .. }
             | Self::RecordFlag { label, .. } => vec![label],
-            Self::AtMostTogether { labels, .. } => labels.iter().map(String::as_str).collect(),
+            Self::AtMostTogether { labels, .. } | Self::OneKilledBy { labels, .. } => {
+                labels.iter().map(String::as_str).collect()
+            }
             Self::AtMostKills { .. } => vec![],
         }
     }
@@ -258,6 +281,24 @@ impl Expect {
             Self::NeverAdmitted(label) => outcome
                 .admitted_at(label)
                 .map(|_| Failure::Admitted(label.clone())),
+            Self::Killed { .. }
+            | Self::OneKilledBy { .. }
+            | Self::NotKilled(_)
+            | Self::AtMostKills { .. } => self.judge_kills(outcome),
+            Self::Ends { label, end } => {
+                let actual = outcome.end_of(label);
+                (actual != Some(end)).then(|| Failure::EndedDifferently {
+                    label: label.clone(),
+                    expected: end.clone(),
+                    actual: actual.cloned(),
+                })
+            }
+        }
+    }
+
+    /// The failure a kill expectation finds in `outcome`, if any.
+    fn judge_kills(&self, outcome: &Outcome) -> Option<Failure> {
+        match self {
             Self::Killed { label, trigger } => {
                 let held = outcome
                     .kills
@@ -267,6 +308,30 @@ impl Expect {
                     label: label.clone(),
                     trigger: *trigger,
                 })
+            }
+            Self::OneKilledBy {
+                labels,
+                trigger,
+                by,
+            } => {
+                let killed = outcome
+                    .kills
+                    .iter()
+                    .filter(|(l, t, at)| labels.contains(l) && t == trigger && at <= by)
+                    .count();
+                match killed {
+                    0 => Some(Failure::NoneKilledBy {
+                        labels: labels.clone(),
+                        trigger: *trigger,
+                        by: *by,
+                    }),
+                    1 => None,
+                    _ => Some(Failure::TooManyKills {
+                        trigger: *trigger,
+                        allowed: 1,
+                        killed,
+                    }),
+                }
             }
             Self::NotKilled(label) => outcome
                 .kills
@@ -285,14 +350,7 @@ impl Expect {
                     killed,
                 })
             }
-            Self::Ends { label, end } => {
-                let actual = outcome.end_of(label);
-                (actual != Some(end)).then(|| Failure::EndedDifferently {
-                    label: label.clone(),
-                    expected: end.clone(),
-                    actual: actual.cloned(),
-                })
-            }
+            _ => None,
         }
     }
 }

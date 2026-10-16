@@ -31,6 +31,8 @@ pub enum Event {
 pub enum Invalid {
     /// Two jobs share a label.
     DuplicateLabel(String),
+    /// A job alternates its use with a period of zero.
+    NoPeriod(String),
     /// A fault or an expectation names a job that never arrives.
     UnknownLabel(String),
     /// A fault acts on a job before it arrives.
@@ -189,6 +191,9 @@ impl Scenario {
             if !seen.insert(job.label.as_str()) {
                 problems.push(Invalid::DuplicateLabel(job.label.clone()));
             }
+            if job.alternate.is_some_and(|(period, _)| period.0 == 0) {
+                problems.push(Invalid::NoPeriod(job.label.clone()));
+            }
             for pool in &job.slots {
                 if !self.machine.declares_pool(pool) {
                     problems.push(Invalid::UndeclaredPool {
@@ -250,33 +255,38 @@ impl Scenario {
         {
             problems.push(Invalid::StopsBeforeLastEvent { until, last: *last });
         }
-        for expectation in &self.expectations {
-            if let Expect::NeverTogether { first, second } = expectation
-                && first == second
-            {
-                problems.push(Invalid::DuplicateLabel(first.clone()));
-            }
-            if let Expect::AtMostTogether { allowed, labels } = expectation {
-                let mut seen = HashSet::new();
-                for label in labels {
-                    if !seen.insert(label.as_str()) {
-                        problems.push(Invalid::DuplicateLabel(label.clone()));
-                    }
-                }
-                if *allowed >= seen.len() {
-                    problems.push(Invalid::CantFail {
-                        allowed: *allowed,
-                        jobs: seen.len(),
-                    });
-                }
-            }
-        }
+        problems.extend(self.repeated_labels());
         problems.extend(self.contradictions());
         if problems.is_empty() {
             Ok(())
         } else {
             Err(problems)
         }
+    }
+
+    /// Expectations that name one job twice, and an `at_most_together` that allows every job it names.
+    fn repeated_labels(&self) -> Vec<Invalid> {
+        let mut problems = Vec::new();
+        for expectation in &self.expectations {
+            match expectation {
+                Expect::NeverTogether { first, second } if first == second => {
+                    problems.push(Invalid::DuplicateLabel(first.clone()));
+                }
+                Expect::OneKilledBy { labels, .. } => problems.extend(duplicates(labels).0),
+                Expect::AtMostTogether { allowed, labels } => {
+                    let (repeats, jobs) = duplicates(labels);
+                    problems.extend(repeats);
+                    if *allowed >= jobs {
+                        problems.push(Invalid::CantFail {
+                            allowed: *allowed,
+                            jobs,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        problems
     }
 
     /// Expectations that can't all hold, that can't fail, or that can't be judged within the run.
@@ -341,6 +351,17 @@ impl Scenario {
                         .any(|other| matches!(other, Expect::AtMostKills { trigger: t, allowed: 0 } if t == trigger));
                     if self.expectations.contains(&Expect::not_killed(label)) || no_kills {
                         problems.push(Invalid::Contradicts(label.clone()));
+                    }
+                }
+                Expect::OneKilledBy {
+                    labels, trigger, ..
+                } => {
+                    let no_kills = self
+                        .expectations
+                        .iter()
+                        .any(|other| matches!(other, Expect::AtMostKills { trigger: t, allowed: 0 } if t == trigger));
+                    if no_kills && let Some(first) = labels.first() {
+                        problems.push(Invalid::Contradicts(first.clone()));
                     }
                 }
                 Expect::AdmittedBy { label, by }
@@ -440,10 +461,21 @@ impl Scenario {
     }
 }
 
+/// Each label named more than once in `labels`, and how many different jobs it names.
+fn duplicates(labels: &[String]) -> (Vec<Invalid>, usize) {
+    let mut seen = HashSet::new();
+    let repeats = labels
+        .iter()
+        .filter(|label| !seen.insert(label.as_str()))
+        .map(|label| Invalid::DuplicateLabel(label.clone()))
+        .collect();
+    (repeats, seen.len())
+}
+
 /// The time an expectation names, if it names one.
 fn named_time(expectation: &Expect) -> Option<Ms> {
     match expectation {
-        Expect::AdmittedBy { by, .. } => Some(*by),
+        Expect::AdmittedBy { by, .. } | Expect::OneKilledBy { by, .. } => Some(*by),
         Expect::NotAdmittedBefore { before, .. } => Some(*before),
         _ => None,
     }

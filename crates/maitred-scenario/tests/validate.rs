@@ -442,3 +442,68 @@ fn at_most_together_that_never_admitted_jobs_make_unbreakable_is_refused() {
         Err(vec![Invalid::NeverFails("a".into())])
     );
 }
+
+#[test]
+fn one_killed_by_and_at_most_no_kills_for_its_trigger_are_refused() {
+    let scenario = two_jobs("one killed, yet no kills")
+        .expect(Expect::one_killed_by(
+            &["a", "b"],
+            maitred_scenario::Trigger::Memory,
+            secs(1),
+        ))
+        .expect(Expect::at_most_kills(maitred_scenario::Trigger::Memory, 0))
+        .run_until(secs(2));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn one_killed_by_naming_a_job_twice_is_refused() {
+    let scenario = two_jobs("a twice")
+        .expect(Expect::one_killed_by(
+            &["a", "a"],
+            maitred_scenario::Trigger::Memory,
+            secs(1),
+        ))
+        .run_until(secs(2));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::DuplicateLabel("a".into())])
+    );
+}
+
+#[test]
+fn one_killed_by_a_time_after_the_run_stops_is_refused() {
+    let scenario = two_jobs("killed after the end")
+        .expect(Expect::one_killed_by(
+            &["a", "b"],
+            maitred_scenario::Trigger::Memory,
+            secs(5),
+        ))
+        .run_until(secs(3));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::StopsBeforeExpectation {
+            until: secs(3),
+            named: secs(5)
+        }])
+    );
+}
+
+#[test]
+fn a_job_alternating_with_no_period_is_refused() {
+    let scenario = Scenario::new("no period", machine()).arrive(
+        ms(0),
+        Job::new("a", Class::Light).alternates_with(ms(0), 100, 64),
+    );
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::NoPeriod("a".into())])
+    );
+}

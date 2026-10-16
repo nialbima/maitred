@@ -35,6 +35,8 @@ pub fn admission() -> Vec<Scenario> {
         the_budget_never_plans_below_the_memory_floor(),
         after_a_wake_with_no_sampler_the_head_waiter_gets_in_first(),
         a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit(),
+        near_tied_jobs_whose_order_flips_lose_exactly_one_promptly(),
+        a_named_victim_whose_holder_is_stopped_gives_way(),
     ]
 }
 
@@ -623,6 +625,85 @@ fn a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit() -> Scenar
     .expect(Expect::admitted_by("w2", ms(6_500)))
     .expect(Expect::never_admitted("w1"))
     .run_until(secs(8))
+}
+
+/// MT-034 (ARCHITECTURE rev 150, Kill policy step 2): the first holder to choose for a breach names the victim, and
+/// later holders keep the name while it stands. `x` and `y` reserve 1000 MB and use 3000 and 3100 MB in opposite
+/// phase, swapping every sample, so each sample names the other as furthest over (both stay over, so under Rule B
+/// the name stands). Outside load reaches 10000 MB at 2 s: 16384 - 10000 - 6100 = 284 MB available, under
+/// `kill_floor` (512). A holder passes every poll interval with up to 20% jitter, so the first chooser names a
+/// victim by about 2.24 s and the victim's holder acts on its next pass, by about 2.48 s. Without the name, two holders
+/// reading alternate samples each name the other and neither acts.
+///
+/// Whether that livelock happens depends on the holders' phases, so the seed must be one whose rhythm gives it; it
+/// is pinned when the simulator runs and the scenario is shown to fail with the name taken out (MT-034).
+fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
+    Scenario::new(
+        "two near-tied jobs whose order flips every sample lose exactly one, promptly",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-034")
+    .load(Sample::at(ms(0)))
+    .load(Sample::at(secs(2)).background(0, 10_000))
+    .arrive(
+        ms(0),
+        Job::new("x", Class::Light)
+            .reserves(500, 1_000)
+            .uses(500, 3_000)
+            .alternates_with(ms(200), 500, 3_100)
+            .runs_for(secs(30)),
+    )
+    .arrive(
+        ms(300),
+        Job::new("y", Class::Light)
+            .reserves(500, 1_000)
+            .uses(500, 3_100)
+            .alternates_with(ms(200), 500, 3_000)
+            .runs_for(secs(30)),
+    )
+    .expect(Expect::one_killed_by(
+        &["x", "y"],
+        Trigger::Memory,
+        ms(2_500),
+    ))
+    .expect(Expect::at_most_kills(Trigger::Memory, 1))
+    .run_until(secs(4))
+}
+
+/// MT-043 (Nick, 2026-10-16; the doc's wording is to come): a holder whose passes have gone stale stops being a
+/// candidate, so a stopped victim's holder can't hold up the kill policy. `y` and `x` are heavy, each using 2000 MB
+/// of a 2048 MB reservation, so neither is over and the victim is the most recently admitted heavy job: `x`,
+/// admitted at about 1 s. `x`'s holder is stopped at 1.5 s. Outside load reaches 12000 MB at 2 s: 16384 - 12000 -
+/// 4000 = 384 MB available, under `kill_floor`. With no candidate over, the name `x` stands (Rule B) while `x` is a
+/// candidate; its holder's last pass is at most 1.5 s, so it is stale by 2.5 s, and `y` is named and stopped by
+/// the stall limit plus 2 poll intervals after the breach (3.4 s, with jitter 3.5 s). Without the rule nobody acts.
+fn a_named_victim_whose_holder_is_stopped_gives_way() -> Scenario {
+    Scenario::new(
+        "a named victim whose holder is stopped gives way to the next candidate",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-043")
+    .load(Sample::at(ms(0)))
+    .load(Sample::at(secs(2)).background(0, 12_000))
+    .arrive(
+        ms(0),
+        Job::new("y", Class::Heavy)
+            .reserves(2_000, 2_048)
+            .uses(500, 2_000)
+            .runs_for(secs(30)),
+    )
+    .arrive(
+        ms(1_000),
+        Job::new("x", Class::Heavy)
+            .reserves(2_000, 2_048)
+            .uses(500, 2_000)
+            .runs_for(secs(30)),
+    )
+    .fault(ms(1_500), Fault::signal("x", Process::Holder, Signal::Stop))
+    .expect(Expect::one_killed_by(&["y"], Trigger::Memory, ms(3_500)))
+    .expect(Expect::not_killed("x"))
+    .expect(Expect::at_most_kills(Trigger::Memory, 1))
+    .run_until(secs(5))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.
