@@ -79,8 +79,12 @@ fn a_named_victims_holder_marks_it_stopping_under_admit_lock() {
 
 #[test]
 fn an_orphans_holder_still_marks_it_stopping() {
+    let running_on = Situation {
+        session_alive: true,
+        ..orphaned(State::Running)
+    };
     assert_eq!(
-        next(orphaned(State::Running), Event::Named),
+        next(running_on, Event::Named),
         Ok(vec![act(
             Holder,
             &[Admit, Lock::Marker],
@@ -109,9 +113,9 @@ fn a_stopped_job_ends_record_first_then_ticket_then_marker() {
 #[test]
 fn a_running_job_ends_record_first() {
     assert_eq!(
-        next(living(State::Running), Event::End(Outcome::Exited)),
+        next(living(State::Running), Event::End(Outcome::Completed)),
         Ok(vec![
-            act(Supervisor, &[Ticket], Write::Record(Outcome::Exited)),
+            act(Supervisor, &[Ticket], Write::Record(Outcome::Completed)),
             act(Supervisor, &[Ticket], Write::DeleteTicket),
         ])
     );
@@ -122,7 +126,7 @@ fn a_waiting_or_admitted_ticket_ends_record_first() {
     for (state, outcome) in [
         (State::Waiting, Outcome::Cancelled),
         (State::Waiting, Outcome::TimedOut),
-        (State::Admitted, Outcome::Signalled),
+        (State::Admitted, Outcome::Abandoned),
         (State::Admitted, Outcome::SpawnFailed),
     ] {
         assert_eq!(
@@ -203,23 +207,43 @@ fn an_interrupted_orphan_is_recorded_and_queued_again() {
     );
 }
 
+// Nick, 2026-10-16: an orphan's kill ends as killed, and the job isn't queued again.
+
 #[test]
-fn an_interrupted_orphans_free_marker_goes_after_its_ticket() {
-    let was_stopping = Situation {
-        marker: Marker::Free,
+fn an_orphans_holder_records_its_own_kill() {
+    let being_killed = Situation {
+        marker: Marker::Held,
         ..orphaned(State::Running)
     };
 
     assert_eq!(
-        next(was_stopping, Event::Adopt),
+        next(being_killed, Event::Gone),
         Ok(vec![
-            act(Adopter, &[Ticket], Write::Record(Outcome::Interrupted)),
-            act(Adopter, &[Ticket], Write::DeleteTicket),
-            act(Adopter, &[Lock::Marker], Write::DeleteMarker),
-            act(Adopter, &[Admit, Ticket], Write::CreateTicket),
-            act(Adopter, &[Ticket], Write::StartHolder),
+            act(Holder, &[Ticket], Write::Record(Outcome::Killed)),
+            act(Holder, &[Ticket], Write::DeleteTicket),
+            act(Holder, &[Lock::Marker], Write::DeleteMarker),
         ])
     );
+}
+
+#[test]
+fn an_orphan_left_with_a_free_marker_was_killed_and_is_not_queued_again() {
+    // Its holder died before finishing: the marker shows a kill was started.
+    let was_stopping = Situation {
+        marker: Marker::Free,
+        ..orphaned(State::Running)
+    };
+    for (event, by) in [(Event::Adopt, Adopter), (Event::Sweep, Sweep)] {
+        assert_eq!(
+            next(was_stopping, event),
+            Ok(vec![
+                act(by, &[Ticket], Write::Record(Outcome::Killed)),
+                act(by, &[Ticket], Write::DeleteTicket),
+                act(by, &[Lock::Marker], Write::DeleteMarker),
+            ]),
+            "{event:?}"
+        );
+    }
 }
 
 #[test]
@@ -276,7 +300,7 @@ fn an_orphan_is_never_admitted_started_or_ended_by_its_dead_supervisor() {
         for event in [
             Event::Admit,
             Event::Start,
-            Event::End(Outcome::Exited),
+            Event::End(Outcome::Completed),
             Event::Gone,
         ] {
             assert_eq!(
@@ -307,7 +331,7 @@ fn a_stopping_job_ends_only_through_the_kill() {
     };
 
     assert_eq!(
-        next(stopping, Event::End(Outcome::Exited)),
+        next(stopping, Event::End(Outcome::Completed)),
         Err(Refused::NotFromHere)
     );
     assert_eq!(
@@ -394,13 +418,15 @@ fn every_event() -> Vec<Event> {
     ];
     all.extend(
         [
-            Outcome::Exited,
+            Outcome::Completed,
             Outcome::Cancelled,
             Outcome::TimedOut,
-            Outcome::Signalled,
+            Outcome::Abandoned,
+            Outcome::StoppedBySignal,
             Outcome::SpawnFailed,
             Outcome::Killed,
             Outcome::Interrupted,
+            Outcome::HolderLost,
             Outcome::Expired,
         ]
         .map(Event::End),
@@ -515,10 +541,54 @@ fn a_job_whose_session_is_alive_is_never_ended_by_anyone_else() {
 }
 
 #[test]
+fn a_running_job_ends_with_the_outcomes_only_a_run_has() {
+    for outcome in [
+        Outcome::Completed,
+        Outcome::StoppedBySignal,
+        Outcome::HolderLost,
+        Outcome::Cancelled,
+    ] {
+        assert_eq!(
+            next(living(State::Running), Event::End(outcome)),
+            Ok(vec![
+                act(Supervisor, &[Ticket], Write::Record(outcome)),
+                act(Supervisor, &[Ticket], Write::DeleteTicket),
+            ]),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn a_running_job_is_never_abandoned_and_never_fails_to_spawn() {
+    // Signalled while running, it's stopped by signal (ARCHITECTURE, Signals).
+    for outcome in [Outcome::Abandoned, Outcome::SpawnFailed] {
+        assert_eq!(
+            next(living(State::Running), Event::End(outcome)),
+            Err(Refused::NotFromHere),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn a_ticket_that_never_ran_is_never_stopped_by_signal_or_loses_its_holder_running() {
+    for state in [State::Waiting, State::Admitted] {
+        for outcome in [Outcome::StoppedBySignal, Outcome::HolderLost] {
+            assert_eq!(
+                next(living(state), Event::End(outcome)),
+                Err(Refused::NotFromHere),
+                "{state:?} {outcome:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn only_a_job_that_ran_can_exit() {
     for state in [State::Waiting, State::Admitted] {
         assert_eq!(
-            next(living(state), Event::End(Outcome::Exited)),
+            next(living(state), Event::End(Outcome::Completed)),
             Err(Refused::NotFromHere),
             "{state:?}"
         );
@@ -547,5 +617,117 @@ fn a_supervisor_never_ends_its_own_ticket_as_killed_interrupted_or_expired() {
                 "{state:?} {outcome:?}"
             );
         }
+    }
+}
+
+// From Qualmaude's receipt on b4f3798.
+
+#[test]
+fn an_orphan_whose_record_exists_is_removed_whatever_its_state() {
+    // Its supervisor died between the record and the deletion (ARCHITECTURE, The sweep).
+    for state in [State::Waiting, State::Admitted, State::Running] {
+        let finished = Situation {
+            record_present: true,
+            ..orphaned(state)
+        };
+        for event in [Event::Adopt, Event::Sweep] {
+            let by = if event == Event::Adopt {
+                Adopter
+            } else {
+                Sweep
+            };
+            assert_eq!(
+                next(finished, event),
+                Ok(vec![act(by, &[Ticket], Write::DeleteTicket)]),
+                "{state:?} {event:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_record_is_written_over_one_that_exists() {
+    for (at, event, writes) in every_step() {
+        if at.record_present {
+            assert!(
+                !writes.iter().any(|a| matches!(a.write, Write::Record(_))),
+                "{at:?} {event:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_orphan_whose_holder_still_holds_its_marker_is_never_adopted() {
+    // The kill is under way: adopting would queue again a job being shed.
+    let being_killed = Situation {
+        marker: Marker::Held,
+        ..orphaned(State::Running)
+    };
+
+    assert_eq!(next(being_killed, Event::Adopt), Err(Refused::StillRunning));
+}
+
+#[test]
+fn a_ticket_times_out_only_before_admission() {
+    // ARCHITECTURE, exit 75: --timeout passed before admission.
+    assert_eq!(
+        next(living(State::Waiting), Event::End(Outcome::TimedOut)),
+        Ok(vec![
+            act(Supervisor, &[Ticket], Write::Record(Outcome::TimedOut)),
+            act(Supervisor, &[Ticket], Write::DeleteTicket),
+        ])
+    );
+    for state in [State::Admitted, State::Running] {
+        assert_eq!(
+            next(living(state), Event::End(Outcome::TimedOut)),
+            Err(Refused::NotFromHere),
+            "{state:?}"
+        );
+    }
+}
+
+#[test]
+fn an_orphan_whose_session_is_gone_is_never_named() {
+    // Its holder is gone too: there is nobody to carry out the kill.
+    assert_eq!(
+        next(orphaned(State::Running), Event::Named),
+        Err(Refused::NotFromHere)
+    );
+}
+
+#[test]
+fn a_holder_lost_mid_kill_is_recorded_by_its_supervisor() {
+    // ARCHITECTURE, Kill policy: the supervisor stops the session itself and records holder lost.
+    let holder_died = Situation {
+        marker: Marker::Free,
+        ..living(State::Running)
+    };
+
+    assert_eq!(
+        next(holder_died, Event::End(Outcome::HolderLost)),
+        Ok(vec![
+            act(Supervisor, &[Ticket], Write::Record(Outcome::HolderLost)),
+            act(Supervisor, &[Ticket], Write::DeleteTicket),
+            act(Supervisor, &[Lock::Marker], Write::DeleteMarker),
+        ])
+    );
+    assert_eq!(next(holder_died, Event::Gone), Err(Refused::NotFromHere));
+}
+
+#[test]
+fn a_kill_under_way_wins_over_a_cancel_or_a_signal() {
+    // Nick, 2026-10-16: the supervisor lets the kill finish, and the record says killed, noting the
+    // cancel or signal that also came.
+    let stopping = Situation {
+        marker: Marker::Held,
+        ..living(State::Running)
+    };
+    for outcome in [Outcome::Cancelled, Outcome::StoppedBySignal] {
+        assert_eq!(
+            next(stopping, Event::End(outcome)),
+            Err(Refused::KillUnderWay),
+            "{outcome:?}"
+        );
     }
 }
