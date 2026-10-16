@@ -3,4 +3,5 @@
 //! crate.
 
 pub mod regressions;
+pub mod ticket;
 pub mod timing;
