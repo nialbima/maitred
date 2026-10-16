@@ -1,6 +1,7 @@
 //! What a scenario expects of a run, and how each expectation is judged against an outcome.
 
 use crate::outcome::{End, Outcome, Trigger};
+use crate::time::Ms;
 
 /// One expectation. Order is only ever stated between two jobs: real processes poll with jitter, so a whole
 /// admission sequence is more than a run can promise.
@@ -10,10 +11,16 @@ pub enum Expect {
     AdmittedBefore { first: String, second: String },
     /// The job is admitted at some point in the run.
     Admitted(String),
+    /// The job is admitted at or before `by`.
+    AdmittedBy { label: String, by: Ms },
+    /// The job isn't admitted before `before`; later, or never, is fine.
+    NotAdmittedBefore { label: String, before: Ms },
     /// The job is never admitted.
     NeverAdmitted(String),
     /// The two jobs are never running at the same moment.
     NeverTogether { first: String, second: String },
+    /// At no moment are more than `allowed` of these jobs running.
+    AtMostTogether { allowed: usize, labels: Vec<String> },
     /// The job is chosen as a victim for `trigger`.
     Killed { label: String, trigger: Trigger },
     /// The job is never chosen as a victim.
@@ -33,6 +40,20 @@ pub enum Failure {
     },
     NotAdmitted(String),
     Admitted(String),
+    NotAdmittedBy {
+        label: String,
+        by: Ms,
+        at: Option<Ms>,
+    },
+    AdmittedEarly {
+        label: String,
+        before: Ms,
+        at: Ms,
+    },
+    TooManyTogether {
+        allowed: usize,
+        most: usize,
+    },
     RanTogether {
         first: String,
         second: String,
@@ -77,6 +98,30 @@ impl Expect {
     }
 
     #[must_use]
+    pub fn at_most_together(allowed: usize, labels: &[&str]) -> Self {
+        Self::AtMostTogether {
+            allowed,
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn admitted_by(label: &str, by: Ms) -> Self {
+        Self::AdmittedBy {
+            label: label.into(),
+            by,
+        }
+    }
+
+    #[must_use]
+    pub fn not_admitted_before(label: &str, before: Ms) -> Self {
+        Self::NotAdmittedBefore {
+            label: label.into(),
+            before,
+        }
+    }
+
+    #[must_use]
     pub fn never_admitted(label: &str) -> Self {
         Self::NeverAdmitted(label.into())
     }
@@ -114,10 +159,13 @@ impl Expect {
                 vec![first, second]
             }
             Self::Admitted(label)
+            | Self::AdmittedBy { label, .. }
+            | Self::NotAdmittedBefore { label, .. }
             | Self::NeverAdmitted(label)
             | Self::NotKilled(label)
             | Self::Killed { label, .. }
             | Self::Ends { label, .. } => vec![label],
+            Self::AtMostTogether { labels, .. } => labels.iter().map(String::as_str).collect(),
             Self::AtMostKills { .. } => vec![],
         }
     }
@@ -154,6 +202,30 @@ impl Expect {
                     second: second.clone(),
                 })
             }
+            Self::AtMostTogether { allowed, labels } => {
+                let most = most_running_at_once(outcome, labels);
+                (most > *allowed).then_some(Failure::TooManyTogether {
+                    allowed: *allowed,
+                    most,
+                })
+            }
+            Self::AdmittedBy { label, by } => {
+                let at = outcome.admitted_at(label);
+                at.is_none_or(|at| at > *by)
+                    .then(|| Failure::NotAdmittedBy {
+                        label: label.clone(),
+                        by: *by,
+                        at,
+                    })
+            }
+            Self::NotAdmittedBefore { label, before } => outcome
+                .admitted_at(label)
+                .filter(|at| at < before)
+                .map(|at| Failure::AdmittedEarly {
+                    label: label.clone(),
+                    before: *before,
+                    at,
+                }),
             Self::NeverAdmitted(label) => outcome
                 .admitted_at(label)
                 .map(|_| Failure::Admitted(label.clone())),
@@ -194,4 +266,23 @@ impl Expect {
             }
         }
     }
+}
+
+/// The most of `labels` running at any one moment. A run starts at its admission and ends at its end, or never
+/// within the run if it has none; a run that ends at the moment another starts doesn't overlap it.
+fn most_running_at_once(outcome: &Outcome, labels: &[String]) -> usize {
+    let runs: Vec<_> = labels
+        .iter()
+        .filter_map(|label| outcome.run_of(label))
+        .collect();
+    runs.iter()
+        .map(|(start, _)| {
+            runs.iter()
+                .filter(|(other_start, other_end)| {
+                    other_start <= start && other_end.is_none_or(|end| *start < end)
+                })
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
 }

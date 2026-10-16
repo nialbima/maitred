@@ -5,8 +5,8 @@
 //! 1 s stall limit. Each scenario's comment works its numbers from "Inside `decide`" (ARCHITECTURE.md).
 
 use maitred_scenario::{
-    Class, ClassCase, Expect, Hook, Job, MachineConfig, Matched, Reading, Sample, Scenario, ms,
-    secs,
+    Class, ClassCase, Expect, Fault, Hook, Job, MachineConfig, Matched, Process, Reading, Sample,
+    Scenario, Signal, ms, secs,
 };
 
 /// The admission scenarios of phase 1.
@@ -17,6 +17,10 @@ pub fn admission() -> Vec<Scenario> {
         unmeasured_job_holds_its_whole_reservation(),
         missing_memory_reading_falls_back_to_one_at_a_time(),
         job_that_can_never_fit_doesnt_hold_the_queue_for_ever(),
+        heavy_limit_counts_admissions_on_paper(),
+        aged_ticket_kept_out_by_its_class_holds_nothing(),
+        orphaned_quiet_job_doesnt_stop_the_queue(),
+        quiet_job_waits_for_a_quiet_machine_without_holding_up_others(),
     ]
 }
 
@@ -106,6 +110,88 @@ fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
     .arrive(ms(0), Job::new("a", Class::Light).reserves(1_000, 15_000))
     .arrive(ms(500), Job::new("b", Class::Light))
     .expect(Expect::admitted("b"))
+}
+
+/// Three heavy jobs, each reserving 2000 millicores, so their budget (6000) fits 8 cores. Only the class limit,
+/// `max_running.heavy` = 2, keeps the third out. Settle (600 ms) spaces the first two. The limit counts jobs
+/// "charged or admitted on paper", so no pass admits a third beside two, and order follows arrival.
+fn heavy_limit_counts_admissions_on_paper() -> Scenario {
+    let heavy = |label| {
+        Job::new(label, Class::Heavy)
+            .reserves(2_000, 1_024)
+            .runs_for(secs(3))
+    };
+    Scenario::new(
+        "no more heavy jobs run than the class allows, in queue order",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission A6")
+    .arrive(ms(0), heavy("h1"))
+    .arrive(ms(300), heavy("h2"))
+    .arrive(ms(600), heavy("h3"))
+    .expect(Expect::at_most_together(2, &["h1", "h2", "h3"]))
+    .expect(Expect::admitted_before("h1", "h2"))
+    .expect(Expect::admitted_before("h2", "h3"))
+    .expect(Expect::admitted("h3"))
+}
+
+/// `h1` and `h2` (heavy, 2000 millicores each, using 100) run for 6 s; `h3` waits on `max_running.heavy` and
+/// is aged by 3.6 s. At 4 s, free CPU is 8000 - 200 used - 2 x (2000 - 100) = 4000 millicores. `h3` is kept out
+/// by its class, so it holds nothing, and `l`'s 3000 fits. If `h3` held its 2000, only 2000 would be free, and `l`
+/// would wait for a heavy job to end at about 6 s. `l` arrives before `h3`'s hold could lapse (6.6 s).
+fn aged_ticket_kept_out_by_its_class_holds_nothing() -> Scenario {
+    let heavy = |label| {
+        Job::new(label, Class::Heavy)
+            .reserves(2_000, 1_024)
+            .runs_for(secs(6))
+    };
+    Scenario::new(
+        "a ticket its class keeps out holds no budget, however long it has waited",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission B6")
+    .arrive(ms(0), heavy("h1"))
+    .arrive(ms(300), heavy("h2"))
+    .arrive(ms(600), heavy("h3"))
+    .arrive(ms(4_000), Job::new("l", Class::Light).reserves(3_000, 512))
+    .expect(Expect::admitted_by("l", ms(5_000)))
+}
+
+/// A quiet job starts on the idle machine (two quiet samples), and its supervisor is then killed, leaving a
+/// running orphan whose holder is alive. It is charged its reservation, but "its class's barrier doesn't
+/// apply", so a light job arriving after it starts within a few passes rather than when the orphan ends.
+fn orphaned_quiet_job_doesnt_stop_the_queue() -> Scenario {
+    Scenario::new(
+        "an orphaned quiet job doesn't stop the queue",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission B8")
+    .arrive(ms(0), Job::new("q", Class::Quiet).runs_for(secs(20)))
+    .fault(
+        ms(1_000),
+        Fault::signal("q", Process::Supervisor, Signal::Kill),
+    )
+    .arrive(ms(1_500), Job::new("l", Class::Light))
+    .expect(Expect::admitted_before("q", "l"))
+    .expect(Expect::admitted_by("l", ms(2_500)))
+}
+
+/// Outside load demands 4000 millicores, half a runnable task per core, over the quiet threshold, so the quiet
+/// streak stays 0. `q` isn't allowed (it needs the streak) until it has waited past `quiet_max_wait` (5 s), and
+/// first-in never waives a class rule, so it doesn't start early. Waiting at the head of the queue before it is
+/// due, it doesn't stop the walk, so `l` starts at once. Once due, the machine drains for it and it gets in.
+fn quiet_job_waits_for_a_quiet_machine_without_holding_up_others() -> Scenario {
+    Scenario::new(
+        "a quiet job neither starts on a busy machine nor holds others up before it is due",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission A3")
+    .load(Sample::at(ms(0)).background(4_000, 0))
+    .arrive(ms(0), Job::new("q", Class::Quiet))
+    .arrive(ms(500), Job::new("l", Class::Light))
+    .expect(Expect::admitted_by("l", ms(1_500)))
+    .expect(Expect::not_admitted_before("q", secs(5)))
+    .expect(Expect::admitted("q"))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

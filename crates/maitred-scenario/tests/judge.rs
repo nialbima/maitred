@@ -217,3 +217,93 @@ fn a_job_still_running_at_the_end_of_the_run_overlaps_anything_admitted_after_it
         }])
     );
 }
+
+#[test]
+fn no_more_than_n_together_passes_when_runs_never_pile_up() {
+    let scenario = two_heavy_jobs()
+        .arrive(ms(9_000), Job::new("c", Class::Heavy))
+        .expect(Expect::at_most_together(2, &["a", "b", "c"]));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .admitted("b", ms(5_100))
+        .ended_at("a", End::Completed { status: 0 }, ms(9_000))
+        .admitted("c", ms(9_100));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn no_more_than_n_together_fails_when_one_more_starts_beside_them() {
+    let scenario = two_heavy_jobs()
+        .arrive(ms(9_000), Job::new("c", Class::Heavy))
+        .expect(Expect::at_most_together(2, &["a", "b", "c"]));
+    let outcome = Outcome::new()
+        .admitted("a", ms(100))
+        .admitted("b", ms(5_100))
+        .admitted("c", ms(9_100));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::TooManyTogether {
+            allowed: 2,
+            most: 3
+        }])
+    );
+}
+
+#[test]
+fn admitted_by_a_time_passes_when_it_started_in_time() {
+    let scenario = two_heavy_jobs().expect(Expect::admitted_by("a", ms(500)));
+    let outcome = Outcome::new().admitted("a", ms(500));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn admitted_by_a_time_fails_when_it_started_late_or_never() {
+    let scenario = two_heavy_jobs()
+        .expect(Expect::admitted_by("a", ms(500)))
+        .expect(Expect::admitted_by("b", ms(6_000)));
+    let outcome = Outcome::new().admitted("a", ms(700));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![
+            Failure::NotAdmittedBy {
+                label: "a".into(),
+                by: ms(500),
+                at: Some(ms(700))
+            },
+            Failure::NotAdmittedBy {
+                label: "b".into(),
+                by: ms(6_000),
+                at: None
+            },
+        ])
+    );
+}
+
+#[test]
+fn not_admitted_before_a_time_passes_when_it_started_then_or_later_or_never() {
+    let scenario = two_heavy_jobs()
+        .expect(Expect::not_admitted_before("a", ms(5_000)))
+        .expect(Expect::not_admitted_before("b", ms(5_000)));
+    let outcome = Outcome::new().admitted("a", ms(5_000));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
+}
+
+#[test]
+fn not_admitted_before_a_time_fails_when_it_started_early() {
+    let scenario = two_heavy_jobs().expect(Expect::not_admitted_before("a", ms(5_000)));
+    let outcome = Outcome::new().admitted("a", ms(4_999));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::AdmittedEarly {
+            label: "a".into(),
+            before: ms(5_000),
+            at: ms(4_999)
+        }])
+    );
+}
