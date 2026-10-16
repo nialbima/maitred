@@ -5,7 +5,7 @@
 //! [`Published`] figures that `load/now.json` carries (ARCHITECTURE.md: `load/now.json`). The simulator and
 //! the test kit's `replay` both call it, so the two targets read identical load.
 
-use crate::machine::{Amount, MachineConfig};
+use crate::machine::{Amount, MachineConfig, Platform};
 use crate::time::Ms;
 
 /// A critical or optional reading the sampler couldn't take (ARCHITECTURE.md: Critical readings).
@@ -13,7 +13,10 @@ use crate::time::Ms;
 pub enum Reading {
     Cpu,
     Memory,
-    CpuPressure,
+    /// `cpu_stall`: Linux's CPU limit and CPU kill figure.
+    CpuStall,
+    /// `cpu_runnable_per_core`: macOS's CPU limit figure.
+    CpuRunnable,
     Gpu,
 }
 
@@ -23,8 +26,12 @@ pub struct Sample {
     /// When the sample was taken; its interval runs from the previous sample (or one sample interval before, for
     /// the first).
     pub at: Ms,
-    /// CPU demand from outside maitred, in millicores. Demand past capacity shows as pressure.
+    /// CPU demand from outside maitred, in millicores. Demand past capacity shows as runnable work per core.
     pub cpu_demand_millicores: u32,
+    /// The fraction of the interval in which some task waited for a CPU, in thousandths (Linux's `cpu_stall`).
+    /// Stated, not derived: the doc gives no formula from demand to stall, so jobs add none, and a scenario that needs
+    /// its jobs to cause stall says so here.
+    pub stall_permille: u32,
     /// Memory in use outside maitred.
     pub mem_used_mb: u32,
     /// GPU utilisation in thousandths, if the machine has a readable GPU.
@@ -41,6 +48,7 @@ impl Sample {
         Self {
             at,
             cpu_demand_millicores: 0,
+            stall_permille: 0,
             mem_used_mb: 0,
             gpu_permille: None,
             woke_at: None,
@@ -53,6 +61,13 @@ impl Sample {
     pub fn background(mut self, cpu_demand_millicores: u32, mem_used_mb: u32) -> Self {
         self.cpu_demand_millicores = cpu_demand_millicores;
         self.mem_used_mb = mem_used_mb;
+        self
+    }
+
+    /// Sets the CPU stall, in thousandths of the interval; capped at the whole interval.
+    #[must_use]
+    pub fn stall(mut self, permille: u32) -> Self {
+        self.stall_permille = permille.min(1_000);
         self
     }
 
@@ -136,15 +151,20 @@ impl<'a> Running<'a> {
 /// What `load/now.json` says after one sample, in the scenario's units.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Published {
+    /// Which platform's figures the file carries ("Absent or null" in the doc).
+    pub platform: Platform,
     pub sampled_at: Ms,
     pub interval: Ms,
     pub fresh: bool,
     pub woke_at: Option<Ms>,
     pub capacity: Amount,
     pub cpu_used_millicores: u32,
-    /// Runnable work per core, in thousandths: 1000 is one runnable task per core. 0 when the sample names the
-    /// reading missing; a reader checks `missing` first.
-    pub cpu_pressure_permille: u32,
+    /// `cpu_stall` in thousandths, on Linux; `None` on macOS, which has none. 0 when the sample names it missing; a
+    /// reader checks `missing` first.
+    pub cpu_stall_permille: Option<u32>,
+    /// `cpu_runnable_per_core` in thousandths: 1000 is one runnable task per core. 0 when the sample names it
+    /// missing.
+    pub cpu_runnable_per_core_permille: u32,
     pub mem_available_mb: u32,
     pub gpu_permille: Option<u32>,
     /// maitred's own running threads: the measured jobs' threads, summed (macOS's CPU kill reads it).
@@ -162,19 +182,18 @@ pub struct Published {
 /// Publishes one sample after another, keeping the streaks between them.
 #[derive(Clone, Debug)]
 pub struct Publisher {
+    platform: Platform,
     capacity: Amount,
     interval: Ms,
     quiet_threshold: u32,
-    cpu_kill_ceiling: u32,
+    cpu_stall_kill_ceiling: u32,
+    cpu_threads_kill_ceiling: u32,
     gpu_kill_ceiling: u32,
     woke_at: Option<Ms>,
     /// When the previous sample was taken, where this sample's interval begins.
     previous: Option<Ms>,
     /// A gap since the previous sample longer than this restarts every streak.
     load_freshness: Ms,
-    /// Whether the CPU-kill streak counts maitred's running threads per core while the CPU is saturated, as on
-    /// macOS, rather than pressure (ARCHITECTURE.md, Kill policy step 1).
-    threads_for_cpu_streak: bool,
     quiet_streak: u32,
     over_cpu_streak: u32,
     over_gpu_streak: u32,
@@ -184,27 +203,20 @@ impl Publisher {
     #[must_use]
     pub fn new(machine: &MachineConfig) -> Self {
         Self {
+            platform: machine.platform,
             capacity: machine.capacity,
             interval: machine.sample_interval,
             quiet_threshold: machine.quiet_threshold_permille,
-            cpu_kill_ceiling: machine.cpu_kill_ceiling_permille,
+            cpu_stall_kill_ceiling: machine.cpu_stall_kill_ceiling_permille,
+            cpu_threads_kill_ceiling: machine.cpu_threads_kill_ceiling_permille,
             gpu_kill_ceiling: machine.gpu_kill_ceiling_permille,
             woke_at: None,
             previous: None,
             load_freshness: machine.load_freshness,
-            threads_for_cpu_streak: false,
             quiet_streak: 0,
             over_cpu_streak: 0,
             over_gpu_streak: 0,
         }
-    }
-
-    /// Counts the CPU-kill streak as macOS does: maitred's own running threads per core, over the CPU-kill ceiling,
-    /// while CPU use is at capacity.
-    #[must_use]
-    pub fn counting_threads_for_the_cpu_streak(mut self) -> Self {
-        self.threads_for_cpu_streak = true;
-        self
     }
 
     /// The load file after `sample`, with `running` jobs using what they declare.
@@ -214,9 +226,10 @@ impl Publisher {
     /// scenario supplies it: the simulator from its own model, the real-process runner from when the victim's
     /// session emptied.
     ///
-    /// A missing CPU-pressure reading counts toward neither the quiet streak nor the CPU-kill streak, and a
-    /// missing GPU reading toward no GPU streak: with no figure there is no CPU limit, no CPU kill and no GPU
-    /// kill (ARCHITECTURE.md, Critical readings).
+    /// A missing figure for the platform's CPU limit (stall on Linux, runnable work per core on macOS) counts toward
+    /// no quiet streak; a missing stall reading toward no CPU-kill streak on Linux, and a missing CPU reading on
+    /// macOS; a missing GPU reading toward no GPU streak (ARCHITECTURE.md, Critical readings). The quiet streak still
+    /// counts demand under the quiet threshold of capacity: the doc doesn't yet say which figure it reads.
     pub fn publish(
         &mut self,
         sample: &Sample,
@@ -228,7 +241,7 @@ impl Publisher {
         });
         let job_mem: u32 = running.iter().map(|job| job.uses.mem_mb).sum();
         let demand = sample.cpu_demand_millicores.saturating_add(job_cpu);
-        let pressure = permille(demand, self.capacity.cpu_millicores);
+        let runnable = permille(demand, self.capacity.cpu_millicores);
         let woke = sample.woke_at.is_some();
         if woke {
             self.woke_at = sample.woke_at;
@@ -239,7 +252,12 @@ impl Publisher {
         let gap = sample.at - began > self.load_freshness;
         self.previous = Some(sample.at);
         let counts_for_kill = !woke && !gap && victim_gone.is_none_or(|gone| began > gone);
-        let pressure_read = !sample.missing.contains(&Reading::CpuPressure);
+        let stall_read = !sample.missing.contains(&Reading::CpuStall);
+        let runnable_read = !sample.missing.contains(&Reading::CpuRunnable);
+        let limit_figure_read = match self.platform {
+            Platform::Linux => stall_read,
+            Platform::MacOs => runnable_read,
+        };
         let cpu_read = !sample.missing.contains(&Reading::Cpu);
         let capacity = u64::from(self.capacity.cpu_millicores);
         // Comparisons are exact: demand per core over a ceiling in thousandths, without rounding the quotient.
@@ -248,7 +266,7 @@ impl Publisher {
         let gpu_read = !sample.missing.contains(&Reading::Gpu);
 
         let quiet = u64::from(demand) * 1_000 < u64::from(self.quiet_threshold) * capacity;
-        self.quiet_streak = if woke || gap || !pressure_read || !quiet {
+        self.quiet_streak = if woke || gap || !limit_figure_read || !quiet {
             0
         } else {
             self.quiet_streak + 1
@@ -257,14 +275,14 @@ impl Publisher {
             .iter()
             .filter(|job| job.measured)
             .fold(0_u32, |sum, job| sum.saturating_add(job.threads_milli));
-        let over_cpu = if self.threads_for_cpu_streak {
+        let over_cpu = match self.platform {
             // macOS: maitred's own running threads per core, counted only while CPU use is known and at capacity.
-            cpu_read
-                && demand >= self.capacity.cpu_millicores
-                && u64::from(measured_threads_milli) * 1_000
-                    > u64::from(self.cpu_kill_ceiling) * capacity
-        } else {
-            pressure_read && per_core_over(demand, self.cpu_kill_ceiling)
+            Platform::MacOs => {
+                cpu_read
+                    && demand >= self.capacity.cpu_millicores
+                    && per_core_over(measured_threads_milli, self.cpu_threads_kill_ceiling)
+            }
+            Platform::Linux => stall_read && sample.stall_permille > self.cpu_stall_kill_ceiling,
         };
         self.over_cpu_streak = if counts_for_kill && over_cpu {
             self.over_cpu_streak + 1
@@ -279,13 +297,19 @@ impl Publisher {
         };
 
         Published {
+            platform: self.platform,
             sampled_at: sample.at,
             interval: sample.at - began,
             fresh: !woke,
             woke_at: self.woke_at,
             capacity: self.capacity,
             cpu_used_millicores: demand.min(self.capacity.cpu_millicores),
-            cpu_pressure_permille: if pressure_read { pressure } else { 0 },
+            cpu_stall_permille: (self.platform == Platform::Linux).then_some(if stall_read {
+                sample.stall_permille
+            } else {
+                0
+            }),
+            cpu_runnable_per_core_permille: if runnable_read { runnable } else { 0 },
             mem_available_mb: self
                 .capacity
                 .mem_mb

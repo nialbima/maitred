@@ -7,16 +7,7 @@
 
 use std::fmt::Write as _;
 
-use maitred_scenario::{Ms, Published, Reading};
-
-/// Which platform's fields the file carries ("Absent or null" in the doc).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Platform {
-    /// Writes `pressure`; no `maitred_running_threads` or `sleep_assertions`.
-    Linux,
-    /// Writes `maitred_running_threads` and `sleep_assertions`; no `pressure`.
-    MacOs,
-}
+use maitred_scenario::{Ms, Platform, Published, Reading};
 
 /// Where scenario time 0 falls on each of the two clocks the file uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +21,6 @@ pub struct Clocks {
 /// What the file needs beyond the published sample.
 #[derive(Clone, Copy, Debug)]
 pub struct Written<'a> {
-    pub platform: Platform,
     pub clocks: Clocks,
     /// The ticket header's `boot` value; written as 16 lowercase hex digits.
     pub boot: u64,
@@ -44,7 +34,8 @@ pub struct Written<'a> {
 fn field_name(reading: Reading) -> &'static str {
     match reading {
         Reading::Cpu => "cpu_used_millicores",
-        Reading::CpuPressure => "cpu_pressure",
+        Reading::CpuStall => "cpu_stall",
+        Reading::CpuRunnable => "cpu_runnable_per_core",
         Reading::Memory => "mem_available_mb",
         Reading::Gpu => "gpu",
     }
@@ -110,9 +101,9 @@ fn reading(published: &Published, which: Reading, value: String) -> String {
 pub fn now_json(published: &Published, written: &Written<'_>) -> String {
     let mut json = String::from("{\"v\":\"4.0\",");
     times(&mut json, published, written);
-    readings(&mut json, published, written.platform);
+    readings(&mut json, published);
     jobs(&mut json, published, written);
-    if written.platform == Platform::MacOs {
+    if published.platform == Platform::MacOs {
         // Sleep assertions aren't modelled in scenarios; written as none.
         json.push_str("\"sleep_assertions\":{\"count\":0,\"unexpected\":0},");
     }
@@ -156,7 +147,8 @@ fn times(json: &mut String, published: &Published, written: &Written<'_>) {
 
 /// `capacity` through `pressure`: the machine's figures, null where the sample names a reading missing, and absent
 /// where the platform has none.
-fn readings(json: &mut String, published: &Published, platform: Platform) {
+fn readings(json: &mut String, published: &Published) {
+    let platform = published.platform;
     let _ = write!(
         json,
         "\"capacity\":{{\"cpu_millicores\":{},\"mem_mb\":{}}},",
@@ -164,16 +156,27 @@ fn readings(json: &mut String, published: &Published, platform: Platform) {
     );
     let _ = write!(
         json,
-        "\"cpu_used_millicores\":{},\"cpu_pressure\":{},",
+        "\"cpu_used_millicores\":{},",
         reading(
             published,
             Reading::Cpu,
             published.cpu_used_millicores.to_string()
-        ),
+        )
+    );
+    if let Some(stall) = published.cpu_stall_permille {
+        let _ = write!(
+            json,
+            "\"cpu_stall\":{},",
+            reading(published, Reading::CpuStall, thousandths(stall))
+        );
+    }
+    let _ = write!(
+        json,
+        "\"cpu_runnable_per_core\":{},",
         reading(
             published,
-            Reading::CpuPressure,
-            thousandths(published.cpu_pressure_permille)
+            Reading::CpuRunnable,
+            thousandths(published.cpu_runnable_per_core_permille)
         )
     );
     if platform == Platform::MacOs {
@@ -207,10 +210,10 @@ fn readings(json: &mut String, published: &Published, platform: Platform) {
         "\"quiet_streak\":{},\"over_cpu_streak\":{},\"over_gpu_streak\":{},",
         published.quiet_streak, published.over_cpu_streak, published.over_gpu_streak
     );
-    if platform == Platform::Linux && published.missing.contains(&Reading::CpuPressure) {
+    if platform == Platform::Linux && published.missing.contains(&Reading::CpuStall) {
         json.push_str("\"pressure\":null,");
     } else if platform == Platform::Linux {
-        // Decisions read cpu_pressure, not these averages, so scenarios don't model them.
+        // Decisions read cpu_stall, not these averages, so scenarios don't model them.
         json.push_str(
             "\"pressure\":{\"cpu_some_avg10\":0.0,\"mem_some_avg10\":0.0,\"level\":\"normal\"},",
         );

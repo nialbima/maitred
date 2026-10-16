@@ -2,11 +2,10 @@
 //! maitred's readers is tested against.
 
 use maitred_scenario::{Amount, MachineConfig, Publisher, Reading, Running, Sample, ms};
-use maitred_testkit::load_file::{Clocks, Platform, Written, now_json, rfc3339};
+use maitred_testkit::load_file::{Clocks, Written, now_json, rfc3339};
 
-fn inputs(platform: Platform) -> Written<'static> {
+fn inputs() -> Written<'static> {
     Written {
-        platform,
         clocks: Clocks {
             wall_ms_at_start: 1_700_000_000_000,
             boot_ms_at_start: 50_000,
@@ -17,8 +16,17 @@ fn inputs(platform: Platform) -> Written<'static> {
     }
 }
 
+/// A Linux machine's sample; `published_on_macos` gives the same on macOS.
 fn published(sample: &Sample) -> maitred_scenario::Published {
-    let mut publisher = Publisher::new(&MachineConfig::for_tests());
+    publish(sample, &MachineConfig::for_tests())
+}
+
+fn published_on_macos(sample: &Sample) -> maitred_scenario::Published {
+    publish(sample, &MachineConfig::for_tests().on_macos())
+}
+
+fn publish(sample: &Sample, machine: &MachineConfig) -> maitred_scenario::Published {
+    let mut publisher = Publisher::new(machine);
     let a = Amount {
         cpu_millicores: 1_850,
         mem_mb: 760,
@@ -38,8 +46,8 @@ fn times_are_written_as_rfc_3339_in_utc_with_milliseconds() {
 }
 
 #[test]
-fn a_linux_load_file_has_every_field_the_doc_lists_and_pressure_but_no_macos_ones() {
-    let json = now_json(&published(&Sample::at(ms(2_000))), &inputs(Platform::Linux));
+fn a_linux_load_file_has_every_field_the_doc_lists_and_stall_but_no_macos_ones() {
+    let json = now_json(&published(&Sample::at(ms(2_000))), &inputs());
 
     assert_eq!(
         json,
@@ -49,7 +57,7 @@ fn a_linux_load_file_has_every_field_the_doc_lists_and_pressure_but_no_macos_one
             "\"boot\":\"0123456789abcdef\",\"interval_ms\":200,\"fresh\":true,",
             "\"woke_at\":null,\"woke_at_ms\":null,",
             "\"capacity\":{\"cpu_millicores\":8000,\"mem_mb\":16384},",
-            "\"cpu_used_millicores\":1850,\"cpu_pressure\":0.231,",
+            "\"cpu_used_millicores\":1850,\"cpu_stall\":0.0,\"cpu_runnable_per_core\":0.231,",
             "\"mem_available_mb\":15624,",
             "\"quiet_streak\":0,\"over_cpu_streak\":0,\"over_gpu_streak\":0,",
             "\"pressure\":{\"cpu_some_avg10\":0.0,\"mem_some_avg10\":0.0,\"level\":\"normal\"},",
@@ -61,8 +69,8 @@ fn a_linux_load_file_has_every_field_the_doc_lists_and_pressure_but_no_macos_one
 }
 
 #[test]
-fn a_macos_load_file_has_threads_and_sleep_assertions_but_no_pressure() {
-    let json = now_json(&published(&Sample::at(ms(2_000))), &inputs(Platform::MacOs));
+fn a_macos_load_file_has_threads_and_sleep_assertions_but_no_stall_or_pressure() {
+    let json = now_json(&published_on_macos(&Sample::at(ms(2_000))), &inputs());
 
     assert!(json.contains("\"maitred_running_threads\":2,"), "{json}");
     assert!(
@@ -70,13 +78,15 @@ fn a_macos_load_file_has_threads_and_sleep_assertions_but_no_pressure() {
         "{json}"
     );
     assert!(!json.contains("\"pressure\":{"), "{json}");
+    assert!(!json.contains("\"cpu_stall\""), "{json}");
+    assert!(json.contains("\"cpu_runnable_per_core\":0.231,"), "{json}");
 }
 
 #[test]
 fn a_reading_the_sampler_couldnt_take_is_null_and_named_in_missing() {
     let json = now_json(
         &published(&Sample::at(ms(2_000)).missing(Reading::Memory)),
-        &inputs(Platform::Linux),
+        &inputs(),
     );
 
     assert!(json.contains("\"mem_available_mb\":null,"), "{json}");
@@ -88,11 +98,8 @@ fn a_reading_the_sampler_couldnt_take_is_null_and_named_in_missing() {
 
 #[test]
 fn a_gpu_reading_is_absent_without_a_gpu_and_written_with_one() {
-    let without = now_json(&published(&Sample::at(ms(2_000))), &inputs(Platform::Linux));
-    let with = now_json(
-        &published(&Sample::at(ms(2_000)).gpu(120)),
-        &inputs(Platform::Linux),
-    );
+    let without = now_json(&published(&Sample::at(ms(2_000))), &inputs());
+    let with = now_json(&published(&Sample::at(ms(2_000)).gpu(120)), &inputs());
 
     assert!(!without.contains("\"gpu\""), "{without}");
     assert!(
@@ -105,7 +112,7 @@ fn a_gpu_reading_is_absent_without_a_gpu_and_written_with_one() {
 fn a_wake_is_written_on_both_clocks() {
     let json = now_json(
         &published(&Sample::at(ms(2_000)).woke_at(ms(1_900))),
-        &inputs(Platform::Linux),
+        &inputs(),
     );
 
     assert!(json.contains("\"fresh\":false,"), "{json}");
@@ -117,7 +124,7 @@ fn a_wake_is_written_on_both_clocks() {
 
 #[test]
 fn a_running_job_whose_ticket_replay_hasnt_found_isnt_listed() {
-    let mut no_tickets = inputs(Platform::Linux);
+    let mut no_tickets = inputs();
     no_tickets.tickets = &[];
 
     let json = now_json(&published(&Sample::at(ms(2_000))), &no_tickets);
@@ -127,12 +134,34 @@ fn a_running_job_whose_ticket_replay_hasnt_found_isnt_listed() {
 }
 
 #[test]
-fn an_unread_pressure_reading_writes_the_pressure_block_as_null_not_normal() {
+fn an_unread_stall_reading_is_null_named_in_missing_and_nulls_the_pressure_block() {
     let json = now_json(
-        &published(&Sample::at(ms(2_000)).missing(Reading::CpuPressure)),
-        &inputs(Platform::Linux),
+        &published(&Sample::at(ms(2_000)).missing(Reading::CpuStall)),
+        &inputs(),
     );
 
-    assert!(json.contains("\"cpu_pressure\":null,"), "{json}");
+    assert!(json.contains("\"cpu_stall\":null,"), "{json}");
     assert!(json.contains("\"pressure\":null,"), "{json}");
+    assert!(json.contains("\"missing\":[\"cpu_stall\"]"), "{json}");
+}
+
+#[test]
+fn a_stall_from_the_trace_is_written_as_a_fraction() {
+    let json = now_json(&published(&Sample::at(ms(2_000)).stall(500)), &inputs());
+
+    assert!(json.contains("\"cpu_stall\":0.5,"), "{json}");
+}
+
+#[test]
+fn an_unread_runnable_reading_on_macos_is_null_and_named_in_missing() {
+    let json = now_json(
+        &published_on_macos(&Sample::at(ms(2_000)).missing(Reading::CpuRunnable)),
+        &inputs(),
+    );
+
+    assert!(json.contains("\"cpu_runnable_per_core\":null,"), "{json}");
+    assert!(
+        json.contains("\"missing\":[\"cpu_runnable_per_core\"]"),
+        "{json}"
+    );
 }

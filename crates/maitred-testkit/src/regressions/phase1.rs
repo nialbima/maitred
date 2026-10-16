@@ -38,6 +38,8 @@ pub fn admission() -> Vec<Scenario> {
         near_tied_jobs_whose_order_flips_lose_exactly_one_promptly(),
         a_named_victim_whose_holder_is_stopped_gives_way(),
         a_breach_during_a_swap_storm_still_stops_one_job(),
+        on_linux_cpu_stall_over_its_ceiling_holds_admission(),
+        on_macos_runnable_work_under_its_ceiling_doesnt_hold_admission(),
     ]
 }
 
@@ -743,6 +745,39 @@ fn a_breach_during_a_swap_storm_still_stops_one_job() -> Scenario {
     .expect(Expect::one_killed_by(&["x", "y"], Trigger::Memory, secs(5)))
     .expect(Expect::at_most_kills(Trigger::Memory, 1))
     .run_until(secs(9))
+}
+
+/// MT-033 (ARCHITECTURE rev 187): on Linux the CPU limit reads `cpu_stall` against `cpu_stall_ceiling` (0.3). The
+/// trace has stall at 0.5 until 2 s and none after, with no other load, so `l` waits on the live limits, which
+/// first-in doesn't waive, and gets in within a poll interval and its jitter of the stall clearing.
+fn on_linux_cpu_stall_over_its_ceiling_holds_admission() -> Scenario {
+    Scenario::new(
+        "on Linux, CPU stall over its ceiling holds admission until it clears",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-033")
+    .load(Sample::at(ms(0)).stall(500))
+    .load(Sample::at(secs(2)))
+    .arrive(ms(0), Job::new("l", Class::Light))
+    .expect(Expect::not_admitted_before("l", secs(2)))
+    .expect(Expect::admitted_by("l", ms(2_500)))
+    .run_until(secs(4))
+}
+
+/// MT-033 (ARCHITECTURE rev 187): macOS has no stall figure, so its CPU limit reads `cpu_runnable_per_core` against
+/// `cpu_runnable_ceiling` (1.5). Outside demand of 7200 millicores is 0.9 runnable per core, under it, and leaves
+/// 800 millicores free, so `l` (250 millicores) is admitted on its first pass. The trace's stall of 0.5 would hold
+/// it on Linux; on macOS the figure doesn't exist, and nothing falls back to it.
+fn on_macos_runnable_work_under_its_ceiling_doesnt_hold_admission() -> Scenario {
+    Scenario::new(
+        "on macOS, runnable work under its ceiling doesn't hold admission, whatever the stall",
+        MachineConfig::for_tests().on_macos(),
+    )
+    .checks("MT-033")
+    .load(Sample::at(ms(0)).background(7_200, 0).stall(500))
+    .arrive(ms(0), Job::new("l", Class::Light).reserves(250, 256))
+    .expect(Expect::admitted_by("l", ms(400)))
+    .run_until(secs(2))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

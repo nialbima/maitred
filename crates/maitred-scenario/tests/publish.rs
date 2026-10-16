@@ -34,7 +34,7 @@ fn running_jobs_add_their_use_to_the_background_load() {
 }
 
 #[test]
-fn cpu_used_stops_at_capacity_and_the_excess_shows_as_pressure() {
+fn cpu_used_stops_at_capacity_and_the_excess_shows_as_runnable_work_per_core() {
     let mut publisher = Publisher::new(&machine());
     let sample = Sample::at(ms(200)).background(12_000, 0);
 
@@ -42,7 +42,7 @@ fn cpu_used_stops_at_capacity_and_the_excess_shows_as_pressure() {
 
     assert_eq!(load_file.cpu_used_millicores, 8_000);
     // 16 cores of demand on 8 cores is 2 runnable tasks per core.
-    assert_eq!(load_file.cpu_pressure_permille, 2_000);
+    assert_eq!(load_file.cpu_runnable_per_core_permille, 2_000);
 }
 
 #[test]
@@ -88,12 +88,12 @@ fn the_quiet_streak_counts_consecutive_quiet_samples_and_restarts_on_a_busy_one(
 fn the_cpu_streak_counts_consecutive_samples_over_the_kill_ceiling() {
     let mut publisher = Publisher::new(&machine());
 
-    // 40 cores of demand on 8 is 5 per core, over the ceiling of 4.
-    let streaks: Vec<u32> = [40_000, 40_000, 8_000, 40_000]
+    // Stall of 950 thousandths is over the stall kill ceiling of 900.
+    let streaks: Vec<u32> = [950, 950, 100, 950]
         .iter()
         .enumerate()
-        .map(|(i, cpu)| {
-            let sample = Sample::at(ms(200 * (i as u64 + 1))).background(*cpu, 0);
+        .map(|(i, stall)| {
+            let sample = Sample::at(ms(200 * (i as u64 + 1))).stall(*stall);
             publisher.publish(&sample, &[], None).over_cpu_streak
         })
         .collect();
@@ -104,7 +104,7 @@ fn the_cpu_streak_counts_consecutive_samples_over_the_kill_ceiling() {
 #[test]
 fn after_a_kill_the_cpu_streak_counts_only_samples_that_began_after_the_victim_was_gone() {
     let mut publisher = Publisher::new(&machine());
-    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+    let over = |at| Sample::at(ms(at)).stall(950);
 
     publisher.publish(&over(200), &[], None);
     publisher.publish(&over(400), &[], None);
@@ -118,14 +118,10 @@ fn after_a_kill_the_cpu_streak_counts_only_samples_that_began_after_the_victim_w
 #[test]
 fn the_first_sample_after_a_sleep_is_not_fresh_and_restarts_every_streak() {
     let mut publisher = Publisher::new(&machine());
-    publisher.publish(&Sample::at(ms(200)).background(40_000, 0), &[], None);
+    publisher.publish(&Sample::at(ms(200)).stall(950), &[], None);
 
-    let woken = publisher.publish(
-        &Sample::at(ms(400)).background(40_000, 0).woke_at(ms(350)),
-        &[],
-        None,
-    );
-    let next = publisher.publish(&Sample::at(ms(600)).background(40_000, 0), &[], None);
+    let woken = publisher.publish(&Sample::at(ms(400)).stall(950).woke_at(ms(350)), &[], None);
+    let next = publisher.publish(&Sample::at(ms(600)).stall(950), &[], None);
 
     assert_eq!(
         (woken.fresh, woken.over_cpu_streak, woken.woke_at),
@@ -181,7 +177,7 @@ fn maitreds_running_threads_sum_the_measured_jobs_threads() {
 #[test]
 fn a_samples_interval_begins_at_the_previous_sample_not_a_nominal_length_before() {
     let mut publisher = Publisher::new(&machine());
-    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+    let over = |at| Sample::at(ms(at)).stall(950);
 
     publisher.publish(&over(200), &[], None);
     // A gap in sampling: this sample's interval began at 200, before the victim was gone at 1000.
@@ -196,7 +192,7 @@ fn a_samples_interval_begins_at_the_previous_sample_not_a_nominal_length_before(
 #[test]
 fn a_sample_that_began_exactly_when_the_victim_was_gone_doesnt_count() {
     let mut publisher = Publisher::new(&machine());
-    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+    let over = |at| Sample::at(ms(at)).stall(950);
 
     publisher.publish(&over(200), &[], None);
     publisher.publish(&over(400), &[], None);
@@ -210,19 +206,14 @@ fn a_sample_that_began_exactly_when_the_victim_was_gone_doesnt_count() {
 }
 
 #[test]
-fn a_missing_pressure_reading_counts_toward_no_quiet_or_cpu_streak() {
+fn a_missing_stall_reading_counts_toward_no_quiet_or_cpu_streak_on_linux() {
     let mut publisher = Publisher::new(&machine());
     publisher.publish(&Sample::at(ms(200)), &[], None);
 
-    let quiet_but_unread = publisher.publish(
-        &Sample::at(ms(400)).missing(Reading::CpuPressure),
-        &[],
-        None,
-    );
+    let quiet_but_unread =
+        publisher.publish(&Sample::at(ms(400)).missing(Reading::CpuStall), &[], None);
     let over_but_unread = publisher.publish(
-        &Sample::at(ms(600))
-            .background(40_000, 0)
-            .missing(Reading::CpuPressure),
+        &Sample::at(ms(600)).stall(950).missing(Reading::CpuStall),
         &[],
         None,
     );
@@ -247,7 +238,7 @@ fn a_missing_gpu_reading_counts_toward_no_gpu_streak() {
 
 #[test]
 fn on_macos_the_cpu_streak_counts_maitreds_running_threads_while_the_cpu_is_saturated() {
-    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    let mut publisher = Publisher::new(&machine().on_macos());
     // 40 threads on 8 cores is 5 per core, over the kill ceiling of 4, and the jobs saturate the CPU.
     let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
     // The same threads with the CPU not saturated don't count.
@@ -263,23 +254,67 @@ fn on_macos_the_cpu_streak_counts_maitreds_running_threads_while_the_cpu_is_satu
 }
 
 #[test]
-fn a_missing_pressure_reading_publishes_no_made_up_figure() {
+fn a_missing_stall_reading_publishes_no_made_up_figure() {
     let mut publisher = Publisher::new(&machine());
 
     let load_file = publisher.publish(
-        &Sample::at(ms(200))
-            .background(40_000, 0)
-            .missing(Reading::CpuPressure),
+        &Sample::at(ms(200)).stall(950).missing(Reading::CpuStall),
         &[],
         None,
     );
 
-    assert_eq!(load_file.cpu_pressure_permille, 0);
+    assert_eq!(load_file.cpu_stall_permille, Some(0));
+}
+
+#[test]
+fn a_linux_machine_publishes_the_traces_stall_and_its_jobs_add_none() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(
+        &Sample::at(ms(200)).stall(500),
+        &[Running::measured("a", job(16_000, 0))],
+        None,
+    );
+
+    assert_eq!(load_file.cpu_stall_permille, Some(500));
+    assert_eq!(load_file.cpu_runnable_per_core_permille, 2_000);
+}
+
+#[test]
+fn a_macos_machine_has_no_stall_figure_whatever_the_trace_says() {
+    let mut publisher = Publisher::new(&machine().on_macos());
+
+    let load_file = publisher.publish(&Sample::at(ms(200)).stall(500), &[], None);
+
+    assert_eq!(load_file.cpu_stall_permille, None);
+}
+
+#[test]
+fn demand_alone_never_starts_the_cpu_streak_on_linux() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(&Sample::at(ms(200)).background(40_000, 0), &[], None);
+
+    assert_eq!(load_file.over_cpu_streak, 0);
+}
+
+#[test]
+fn on_macos_a_missing_runnable_reading_counts_toward_no_quiet_streak() {
+    let mut publisher = Publisher::new(&machine().on_macos());
+    publisher.publish(&Sample::at(ms(200)), &[], None);
+
+    let unread = publisher.publish(
+        &Sample::at(ms(400)).missing(Reading::CpuRunnable),
+        &[],
+        None,
+    );
+
+    assert_eq!(unread.quiet_streak, 0);
 }
 
 #[test]
 fn a_job_counts_its_cpu_use_as_running_threads_in_thousandths() {
-    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    let mut publisher = Publisher::new(&machine().on_macos());
     // 1100 millicores is about 1.1 running threads, not 2; eight such jobs are 8.8 threads on 8 cores.
     let jobs: Vec<Running> = ["a", "b", "c", "d", "e", "f", "g", "h"]
         .into_iter()
@@ -293,17 +328,17 @@ fn a_job_counts_its_cpu_use_as_running_threads_in_thousandths() {
 }
 
 #[test]
-fn demand_just_over_the_kill_ceiling_counts_as_over() {
+fn stall_just_over_the_kill_ceiling_counts_as_over() {
     let mut publisher = Publisher::new(&machine());
-    // 32007 millicores on 8000 is 4.000875 runnable per core, just over the ceiling of 4.
-    let load_file = publisher.publish(&Sample::at(ms(200)).background(32_007, 0), &[], None);
+    // 901 thousandths, just over the stall kill ceiling of 900.
+    let load_file = publisher.publish(&Sample::at(ms(200)).stall(901), &[], None);
 
     assert_eq!(load_file.over_cpu_streak, 1);
 }
 
 #[test]
 fn on_macos_a_missing_cpu_reading_counts_toward_no_cpu_streak() {
-    let mut publisher = Publisher::new(&machine()).counting_threads_for_the_cpu_streak();
+    let mut publisher = Publisher::new(&machine().on_macos());
     let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
 
     let load_file = publisher.publish(&Sample::at(ms(200)).missing(Reading::Cpu), &busy, None);
@@ -314,7 +349,7 @@ fn on_macos_a_missing_cpu_reading_counts_toward_no_cpu_streak() {
 #[test]
 fn a_gap_in_sampling_longer_than_load_freshness_restarts_every_streak() {
     let mut publisher = Publisher::new(&machine());
-    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+    let over = |at| Sample::at(ms(at)).stall(950);
 
     publisher.publish(&over(200), &[], None);
     publisher.publish(&over(400), &[], None);
@@ -328,7 +363,7 @@ fn a_gap_in_sampling_longer_than_load_freshness_restarts_every_streak() {
 #[test]
 fn a_gap_within_load_freshness_keeps_the_streak() {
     let mut publisher = Publisher::new(&machine());
-    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+    let over = |at| Sample::at(ms(at)).stall(950);
 
     publisher.publish(&over(200), &[], None);
     let after_short_gap = publisher.publish(&over(700), &[], None);

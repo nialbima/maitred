@@ -34,21 +34,33 @@ pub struct Pool {
     pub empty_first: bool,
 }
 
+/// Which platform's CPU figures the machine has (ARCHITECTURE.md: Inside `decide`, `cpu_load`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Platform {
+    /// `cpu_stall` for the CPU limit and the CPU kill; `cpu_runnable_per_core` recorded for comparison only.
+    Linux,
+    /// No stall figure: `cpu_runnable_per_core` for the CPU limit, maitred's own running threads for the CPU kill.
+    MacOs,
+}
+
 /// The machine's settings, as its administrator would write them.
 ///
 /// Pressure and utilisation figures are in thousandths (0.42 is 420), so the type stays comparable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]
 pub struct MachineConfig {
+    pub platform: Platform,
     pub capacity: Amount,
-    // Live limits: nothing starts past these.
+    // Live limits: nothing starts past these. Each CPU ceiling applies only on the platform whose figure it reads.
     pub mem_floor_mb: u32,
-    pub cpu_ceiling_permille: u32,
+    pub cpu_stall_ceiling_permille: u32,
+    pub cpu_runnable_ceiling_permille: u32,
     pub gpu_ceiling_permille: u32,
     // Kill thresholds.
     pub kill_floor_mb: u32,
     pub mem_critical_mb: u32,
-    pub cpu_kill_ceiling_permille: u32,
+    pub cpu_stall_kill_ceiling_permille: u32,
+    pub cpu_threads_kill_ceiling_permille: u32,
     pub cpu_kill_samples: u32,
     pub gpu_kill_ceiling_permille: u32,
     pub gpu_kill_samples: u32,
@@ -81,25 +93,30 @@ pub struct MachineConfig {
 }
 
 impl MachineConfig {
-    /// An 8-core, 16 GB machine with every duration short enough for a test to run in seconds.
+    /// An 8-core, 16 GB Linux machine with every duration short enough for a test to run in seconds.
     ///
     /// The ratios between durations follow ARCHITECTURE's defaults (stall limit 5 poll intervals,
-    /// freshness 3 sample intervals), so shortening time doesn't change which rule fires first.
+    /// freshness 3 sample intervals), so shortening time doesn't change which rule fires first. The admission
+    /// ceilings are the doc's starting values (0.3 stall, 1.5 runnable per core); the kill ceilings are this kit's
+    /// own, since the doc gives no starting values for them yet.
     #[must_use]
     pub fn for_tests() -> Self {
         let sample = ms(200);
         let poll = ms(200);
         Self {
+            platform: Platform::Linux,
             capacity: Amount {
                 cpu_millicores: 8_000,
                 mem_mb: 16_384,
             },
             mem_floor_mb: 1_024,
-            cpu_ceiling_permille: 2_000,
+            cpu_stall_ceiling_permille: 300,
+            cpu_runnable_ceiling_permille: 1_500,
             gpu_ceiling_permille: 950,
             kill_floor_mb: 512,
             mem_critical_mb: 256,
-            cpu_kill_ceiling_permille: 4_000,
+            cpu_stall_kill_ceiling_permille: 900,
+            cpu_threads_kill_ceiling_permille: 4_000,
             cpu_kill_samples: 3,
             gpu_kill_ceiling_permille: 980,
             gpu_kill_samples: 3,
@@ -154,6 +171,13 @@ impl MachineConfig {
             load_freshness: Ms(sample.0 * 3),
             pools: Vec::new(),
         }
+    }
+
+    /// The same machine running macOS.
+    #[must_use]
+    pub fn on_macos(mut self) -> Self {
+        self.platform = Platform::MacOs;
+        self
     }
 
     /// Declares a slot pool numbered from 1.
