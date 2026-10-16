@@ -368,8 +368,9 @@ fn an_orphaned_quiet_job_does_not_stop_the_queue() {
 #[test]
 fn a_ticket_that_fits_the_free_budget_is_admitted_beside_a_running_one() {
     let mut running = ticket("running", 1, Class::Light, State::Running);
-    running.reservation = Resources::new(4_000, 8_000);
+    running.reservation = Resources::new(4_000, 7_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    // 16 GB free less the 1 GB floor and the running job's 7 leaves 8.
     mine.reservation = Resources::new(4_000, 8_000);
 
     assert_eq!(decide(&snapshot(vec![running, mine]), &me()), admitted());
@@ -537,7 +538,7 @@ fn first_in_admits_a_job_bigger_than_the_free_budget_when_nothing_is_charged() {
     // A reservation is capped at capacity, so on an idle machine anything fits. First-in matters
     // when load from outside maitred takes part of the budget.
     let mut mine = ticket("me", 1, Class::Heavy, State::Waiting);
-    mine.reservation = Resources::new(64_000, 64_000);
+    mine.reservation = Resources::new(64_000, 1_000);
     let mut snap = snapshot(vec![mine]);
     snap.load.as_mut().unwrap().cpu_used_millicores = Some(1_000);
 
@@ -576,7 +577,7 @@ fn a_drained_ticket_whose_memory_does_not_fit_still_waits() {
 #[test]
 fn first_in_admits_only_the_first_allowed_ticket() {
     let mut first = ticket("first", 1, Class::Heavy, State::Waiting);
-    first.reservation = Resources::new(64_000, 64_000);
+    first.reservation = Resources::new(64_000, 1_000);
     let mut snap = snapshot(vec![first, ticket("me", 2, Class::Light, State::Waiting)]);
     snap.load.as_mut().unwrap().cpu_used_millicores = Some(1_000);
 
@@ -1291,7 +1292,8 @@ fn a_lapsed_ticket_that_would_fit_exactly_once_drained_drains_the_machine() {
     let mut running = ticket("running", 0, Class::Light, State::Running);
     running.reservation = Resources::new(1_000, 5_000);
     let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
-    lapsed.reservation = Resources::new(1_000, 14_000);
+    // 9 GB free + 5 GB held - the 1 GB floor = 13 GB, exactly.
+    lapsed.reservation = Resources::new(1_000, 13_000);
     lapsed.waited_ms = 600_000 + 600_001;
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(1_000, 1_000);
@@ -1886,6 +1888,45 @@ fn my_own_wake_also_suspends_stalls_in_the_walk() {
     mine.reservation = Resources::new(3_000, 1_000);
     let mut snap = snapshot(vec![running, asleep, mine]);
     snap.my_wake = Some(BootTime(NOW.0 - 9_999));
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
+}
+
+// MT-035 (Nick, 2026-10-16): the budget keeps mem_floor back, so admission never plans to go below it.
+
+#[test]
+fn the_budget_keeps_the_memory_floor_back() {
+    // 16 GB free, floor 1 GB: two 8 GB tickets would plan the machine down to 0; the second waits.
+    let mut first = ticket("first", 1, Class::Light, State::Waiting);
+    first.reservation = Resources::new(1_000, 8_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 8_000);
+
+    assert_eq!(
+        decide(&snapshot(vec![first, mine]), &me()),
+        Decision::Wait(Reason::Budget)
+    );
+}
+
+#[test]
+fn a_ticket_that_leaves_exactly_the_floor_free_fits() {
+    let mut first = ticket("first", 1, Class::Light, State::Waiting);
+    first.reservation = Resources::new(1_000, 8_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 7_000);
+
+    assert_eq!(decide(&snapshot(vec![first, mine]), &me()), admitted());
+}
+
+#[test]
+fn first_in_never_plans_below_the_floor_either() {
+    // Memory is never waived: 4 GB free less the 1 GB floor leaves 3 GB, short of 3.5.
+    let mut mine = ticket("me", 1, Class::Heavy, State::Waiting);
+    mine.reservation = Resources::new(64_000, 3_500);
+    let mut snap = snapshot(vec![mine]);
+    let load = snap.load.as_mut().unwrap();
+    load.mem_available_mb = Some(4_000);
+    load.cpu_used_millicores = Some(1_000);
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
 }

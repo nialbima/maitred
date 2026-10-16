@@ -326,8 +326,9 @@ impl<'a> Walk<'a> {
             quiet_streak: load.quiet_streak,
             free_cpu: i128::from(load.capacity.cpu_millicores)
                 - i128::from(load.cpu_used_millicores),
-            free_mem: i128::from(load.mem_available_mb),
-            drained_mem: i128::from(load.mem_available_mb),
+            // The budget keeps mem_floor back (MT-035): admission never plans to go below it.
+            free_mem: i128::from(load.mem_available_mb) - i128::from(snap.config.mem_floor_mb),
+            drained_mem: i128::from(load.mem_available_mb) - i128::from(snap.config.mem_floor_mb),
             heavy: 0,
             last_heavy: snap.last_heavy,
             living_charged: charged.iter().any(|t| t.is_living()),

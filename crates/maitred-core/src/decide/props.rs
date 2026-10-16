@@ -100,7 +100,8 @@ proptest! {
         // ARCHITECTURE.md's free.cpu and free.mem, restated: capacity less what is in use, less
         // what each charged ticket hasn't used of its reservation yet.
         let mut free_cpu = i128::from(load.capacity.cpu_millicores) - i128::from(load.cpu_used_millicores.unwrap_or(0));
-        let mut free_mem = i128::from(load.mem_available_mb.unwrap_or(0));
+        // Less the floor, which the budget keeps back (MT-035).
+        let mut free_mem = i128::from(load.mem_available_mb.unwrap_or(0)) - i128::from(snap.config.mem_floor_mb);
         let unreadable = snap.config.class_min.heavy.min(load.capacity);
         free_cpu -= i128::from(snap.unreadable) * i128::from(unreadable.cpu_millicores);
         free_mem -= i128::from(snap.unreadable) * i128::from(unreadable.mem_mb);
