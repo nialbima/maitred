@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use crate::{
-    BootTime, Class, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Resources, Snapshot,
-    State, Ticket, TicketId,
+    BootTime, Class, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources,
+    Snapshot, State, Ticket, TicketId,
 };
 
 pub(crate) const NOW: BootTime = BootTime(1_000_000_000);
@@ -89,26 +89,45 @@ fn tickets() -> impl Strategy<Value = Vec<Ticket>> {
     (0..8usize).prop_flat_map(|n| (0..n).map(ticket).collect::<Vec<_>>())
 }
 
+/// Free memory: mostly comfortable, with about one sample in twenty below the kill floor (500) and
+/// one in twenty between it and the admission floor (1000), so both memory branches are reached.
+fn mem_available() -> impl Strategy<Value = Option<u64>> {
+    // A critical reading goes missing in about 2% of samples (no reliable load).
+    proptest::option::weighted(
+        0.98,
+        prop_oneof![
+            18 => 1_000..16_000u64,
+            1 => 500..1_000u64,
+            1 => 0..500u64,
+        ],
+    )
+}
+
 fn load() -> impl Strategy<Value = Option<Load>> {
+    // No load file at all in 5% of snapshots: the plain-lock fallback.
     proptest::option::weighted(
         0.95,
         (
+            // Not fresh (first sample after a sleep) in 3%; an age past the 6000 ms freshness in
+            // about 8%; the quiet streak 0 to 2, so it is met (2) in a third.
             (proptest::bool::weighted(0.97), 0..6_500u64, 0..3u32),
             (
+                // Outside CPU use up to a quarter of the machine, so budgets often fit.
                 proptest::option::weighted(0.98, 0..2_000u64),
+                // Pressure past the 1.5 ceiling in about 6% of samples.
                 proptest::option::weighted(0.98, 0.0..1.6f64),
             ),
-            (
-                proptest::option::weighted(0.98, 0..16_000u64)
-                    .prop_map(|m| m.map(|m| m.max(2_000) - 2_000 + 1_000)),
-                proptest::option::of(0.0..0.95f64),
-            ),
+            // GPU absent in half; under the 0.9 ceiling almost always when present.
+            (mem_available(), proptest::option::of(0.0..0.95f64)),
             proptest::collection::btree_map(
                 (0..8usize).prop_map(|i| TicketId(format!("t{i}"))),
                 resources(10_000, 20_000),
                 0..4,
             ),
+            // Kill streaks 0 to 7 against a limit of 3: CPU and GPU triggers in about half.
             (0..8u32, 0..8u32),
+            // Woke recently (within the 10 s stall limit) in about 10%, so stalls are suspended.
+            proptest::option::weighted(0.1, 0..20_000u64),
         )
             .prop_map(
                 |(
@@ -117,10 +136,11 @@ fn load() -> impl Strategy<Value = Option<Load>> {
                     (mem, gpu),
                     jobs,
                     (over_cpu_streak, over_gpu_streak),
+                    woke,
                 )| Load {
                     sampled_at: BootTime(NOW.0 - age),
                     fresh,
-                    woke_at: None,
+                    woke_at: woke.map(|ago| BootTime(NOW.0 - ago)),
                     capacity: Resources::new(8_000, 16_000),
                     cpu_used_millicores: cpu_used,
                     cpu_pressure: pressure,
@@ -139,13 +159,25 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
     (
         tickets(),
         load(),
+        // One unreadable ticket in 10% of snapshots: charged the heavy minimum, blocks first-in.
         proptest::bool::weighted(0.1).prop_map(u32::from),
         proptest::option::of(0..60_000u64),
         (1..4u32, resources(2_000, 3_000), 0..4u32, 0..4u32),
+        // A live stop marker in 5% of snapshots: a kill under way, so nothing is chosen.
         proptest::option::weighted(0.05, 0..8usize),
+        // An administrator's move in 10%: ticket i sorts at seq s with sub -1.
+        proptest::option::weighted(0.1, (0..8usize, 0..6u64)),
     )
         .prop_map(
-            |(tickets, load, unreadable, last_heavy, (max_heavy, heavy_min, db, port), marker)| {
+            |(
+                tickets,
+                load,
+                unreadable,
+                last_heavy,
+                (max_heavy, heavy_min, db, port),
+                marker,
+                mv,
+            )| {
                 Snapshot {
                     now: NOW,
                     config: Config {
@@ -187,7 +219,10 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                     tickets,
                     unreadable,
                     last_heavy: last_heavy.map(|age| BootTime(NOW.0 - age)),
-                    moved: BTreeMap::new(),
+                    moved: mv
+                        .map(|(i, seq)| (TicketId(format!("t{i}")), Position { seq, sub: -1 }))
+                        .into_iter()
+                        .collect(),
                     live_stop_markers: marker
                         .map(|i| TicketId(format!("t{i}")))
                         .into_iter()

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::snapshot::Reliable;
 use crate::{
-    BootTime, Class, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId,
+    BootTime, Class, Config, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId,
 };
 
 #[cfg(test)]
@@ -63,6 +63,10 @@ pub enum Reason {
     DrainingFor(TicketId),
     /// The walk stopped at a ticket admitted first in.
     BehindFirstIn(TicketId),
+    /// A quiet ticket ahead was admitted in this walk, and nothing starts beside a quiet job.
+    BehindQuiet(TicketId),
+    /// The ticket's own last pass is older than the stall limit, so the walk skips it.
+    Stalled,
 }
 
 /// A live limit the machine is past.
@@ -91,26 +95,16 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
     let charged: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_charged(t)).collect();
 
     let Some(load) = snap.reliable_load() else {
-        // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
-        let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
-        let first = waiting(snap, false).first().map(|t| &t.id);
-        return if nothing_charged
-            && first == Some(me)
-            && slots_free(snap, mine, &BTreeMap::new()).is_ok()
-        {
-            Decision::Admit(Admission {
-                fallback: true,
-                ..Admission::default()
-            })
-        } else {
-            Decision::Wait(Reason::NoReliableLoad)
-        };
+        return fallback(snap, mine, me, &charged);
     };
 
     if load.mem_available_mb < config.mem_floor_mb {
         return Decision::Wait(Reason::LiveLimit(Limit::Memory));
     }
-    if load.cpu_pressure > config.cpu_ceiling {
+    if load
+        .cpu_pressure
+        .is_some_and(|pressure| pressure > config.cpu_ceiling)
+    {
         return Decision::Wait(Reason::LiveLimit(Limit::Cpu));
     }
     if load
@@ -141,7 +135,7 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
                 }
                 // Nothing starts beside a quiet job, including one admitted earlier in this walk.
                 if t.class == Class::Quiet {
-                    return Decision::Wait(Reason::QuietJobRunning);
+                    return Decision::Wait(Reason::BehindQuiet(t.id.clone()));
                 }
                 walk.admit_on_paper(t);
                 continue;
@@ -159,6 +153,7 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
             return if is_me {
                 Decision::Admit(Admission {
                     first_in: true,
+                    tainted: walk.tainted(t),
                     ..Admission::default()
                 })
             } else {
@@ -176,14 +171,44 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
         if (walk.due_quiet(t) || (walk.lapsed(t) && allowed.is_ok())) && walk.fits_once_drained(t) {
             return Decision::Wait(Reason::DrainingFor(t.id.clone()));
         }
-        // An aged ticket that only the budget keeps out holds its place in it.
-        if walk.aged(t) && allowed.is_ok() {
+        // An aged ticket that only the budget keeps out holds its place in it; one waiting for a
+        // slot or kept out by its class would hold budget it can't use.
+        if walk.aged(t) && held == Reason::Budget {
             walk.hold(t);
         }
     }
-    // `me` is living and waiting, and a ticket deciding for itself has just written its pass, so the
-    // walk reaches it. Only a snapshot built for someone else's pass can leave it stalled.
-    Decision::Wait(Reason::NotWaiting)
+    // `me` is living and waiting but the walk skipped it: its last pass is past the stall limit.
+    Decision::Wait(Reason::Stalled)
+}
+
+/// With no reliable load: one job at a time, blind. A quiet ticket keeps its own rule: no load
+/// figures (most often the burst after a wake) are no time for a benchmark, so it waits until it is
+/// due, then gets in tainted; until then it doesn't hold the line for anyone else.
+fn fallback(snap: &Snapshot, mine: &Ticket, me: &TicketId, charged: &[&Ticket]) -> Decision {
+    if mine.class == Class::Quiet && !due_quiet(&snap.config, mine) {
+        return Decision::Wait(Reason::QuietNeedsIdle);
+    }
+    // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
+    let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
+    let first = waiting(snap, false)
+        .into_iter()
+        .find(|t| t.class != Class::Quiet || due_quiet(&snap.config, t))
+        .map(|t| &t.id);
+    if nothing_charged && first == Some(me) && slots_free(snap, mine, &BTreeMap::new()).is_ok() {
+        Decision::Admit(Admission {
+            fallback: true,
+            tainted: mine.class == Class::Quiet,
+            ..Admission::default()
+        })
+    } else {
+        Decision::Wait(Reason::NoReliableLoad)
+    }
+}
+
+/// A quiet ticket past `quiet_max_wait`: the streak isn't needed any more, and the walk stops at it
+/// until it gets in.
+fn due_quiet(config: &Config, t: &Ticket) -> bool {
+    t.class == Class::Quiet && t.waited_ms > config.quiet_max_wait_ms
 }
 
 /// Charged: living tickets admitted or running, and running orphans of this boot whose holder is
@@ -278,13 +303,15 @@ impl<'a> Walk<'a> {
             admitted_on_paper: 0,
             slots_on_paper: BTreeMap::new(),
         };
+        // An unreadable ticket is locked, so living: charged the heavy minimum, which a drain frees.
         let unreadable = walk.reserve_class(Class::Heavy, Resources::default());
         for _ in 0..snap.unreadable {
             walk.take(unreadable);
+            walk.drained_mem += i128::from(unreadable.mem_mb);
         }
         for t in charged {
-            // Orphans count as using nothing, so they hold their whole reservation.
-            // A living job's use from the sample, if measured. Orphans count as using nothing.
+            // A living job's use from the sample, if measured. Orphans count as using nothing, so
+            // they hold their whole reservation.
             let measured = match t.liveness {
                 Liveness::Living => snap.load.as_ref().and_then(|l| l.jobs.get(&t.id)).copied(),
                 Liveness::Orphaned { .. } => None,
@@ -335,7 +362,7 @@ impl<'a> Walk<'a> {
             Class::Quiet => {
                 let idle = !self.living_charged && self.admitted_on_paper == 0;
                 let streak = self.quiet_streak >= config.quiet_streak_needed;
-                if idle && (streak || self.tainted(t)) {
+                if idle && (streak || self.due_quiet(t)) {
                     Ok(())
                 } else {
                     Err(Reason::QuietNeedsIdle)
@@ -352,8 +379,23 @@ impl<'a> Walk<'a> {
         slots_free(self.snap, t, &self.slots_on_paper)
     }
 
+    /// Whether a drain could let `t` in: its memory fits in `drained_mem`, and every pool it asks
+    /// has a slot that ending every living job would free (a slot an orphan or leftover names stays
+    /// taken, and an undeclared or empty pool has none).
     fn fits_once_drained(&self, t: &Ticket) -> bool {
-        i128::from(self.reserve(t).mem_mb) <= self.drained_mem
+        let slots = t.pools.iter().all(|pool| {
+            self.snap.config.pools.get(pool).is_some_and(|cfg| {
+                let kept = self
+                    .snap
+                    .tickets
+                    .iter()
+                    .filter(|o| !o.is_living())
+                    .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
+                    .count();
+                u64::try_from(kept).unwrap_or(u64::MAX) < u64::from(cfg.size)
+            })
+        });
+        slots && i128::from(self.reserve(t).mem_mb) <= self.drained_mem
     }
 
     fn memory_fits(&self, t: &Ticket) -> bool {
@@ -376,9 +418,10 @@ impl<'a> Walk<'a> {
         !self.living_charged && self.admitted_on_paper == 0
     }
 
-    /// A quiet ticket past `quiet_max_wait`: admitted without the streak, and marked so.
+    /// A quiet ticket admitted without the quiet streak, which only `quiet_max_wait` allows: its
+    /// timing can't be trusted, so its record is marked tainted.
     fn tainted(&self, t: &Ticket) -> bool {
-        t.class == Class::Quiet && t.waited_ms > self.snap.config.quiet_max_wait_ms
+        t.class == Class::Quiet && self.quiet_streak < self.snap.config.quiet_streak_needed
     }
 
     /// A ticket whose aged hold has lapsed: it drains the machine instead, so it is admitted
@@ -389,9 +432,8 @@ impl<'a> Walk<'a> {
             && t.waited_ms > config.aging_ms.saturating_add(config.aging_hold_ms)
     }
 
-    /// A quiet ticket past `quiet_max_wait`: the walk stops at it until it gets in.
     fn due_quiet(&self, t: &Ticket) -> bool {
-        self.tainted(t)
+        due_quiet(&self.snap.config, t)
     }
 
     fn aged(&self, t: &Ticket) -> bool {

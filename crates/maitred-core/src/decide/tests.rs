@@ -256,14 +256,16 @@ fn a_missing_cpu_reading_is_no_reliable_load() {
 }
 
 #[test]
-fn a_missing_cpu_pressure_reading_is_no_reliable_load() {
+fn a_missing_cpu_pressure_reading_only_turns_off_the_cpu_limit() {
+    // ARCHITECTURE, Critical readings: CPU pressure isn't critical; a missing figure means no CPU
+    // limit, not one job at a time.
     let mut snap = snapshot(vec![
         ticket("running", 1, Class::Light, State::Running),
         ticket("me", 2, Class::Light, State::Waiting),
     ]);
     snap.load.as_mut().unwrap().cpu_pressure = None;
 
-    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+    assert_eq!(decide(&snap, &me()), admitted());
 }
 
 #[test]
@@ -1110,20 +1112,6 @@ fn a_heavy_admitted_earlier_in_the_walk_counts_toward_max_running_heavy() {
 }
 
 #[test]
-fn nothing_starts_beside_a_quiet_job_admitted_earlier_in_the_walk() {
-    let mut snap = snapshot(vec![
-        ticket("quiet", 1, Class::Quiet, State::Waiting),
-        ticket("me", 2, Class::Light, State::Waiting),
-    ]);
-    snap.load.as_mut().unwrap().quiet_streak = 2;
-
-    assert_eq!(
-        decide(&snap, &me()),
-        Decision::Wait(Reason::QuietJobRunning)
-    );
-}
-
-#[test]
 fn a_ticket_moved_ahead_is_walked_at_its_new_place() {
     let mut running = ticket("running", 0, Class::Light, State::Running);
     running.reservation = Resources::new(4_000, 1_000);
@@ -1367,4 +1355,234 @@ fn a_lapsed_ticket_its_class_rules_keep_out_does_not_drain_the_machine() {
     snap.config.max_running_heavy = 1;
 
     assert_eq!(decide(&snap, &me()), admitted());
+}
+
+// Qualmaude's review of d386de2 (MT-019's slots and unreadable tickets, MT-021, MT-022).
+
+fn lapsed_asking(pool: &Pool) -> Ticket {
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.waited_ms = 600_000 + 600_001;
+    lapsed.pools.insert(pool.clone());
+    lapsed
+}
+
+#[test]
+fn a_lapsed_ticket_asking_an_undeclared_pool_does_not_stop_the_queue() {
+    let pool = Pool("gone".into());
+    let snap = snapshot(vec![
+        ticket("running", 0, Class::Light, State::Running),
+        lapsed_asking(&pool),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_asking_an_empty_pool_does_not_stop_the_queue() {
+    let pool = Pool("db".into());
+    let mut snap = snapshot(vec![
+        ticket("running", 0, Class::Light, State::Running),
+        lapsed_asking(&pool),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 0 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_whose_slot_an_orphan_holds_does_not_stop_the_queue() {
+    // A drain waits only for living jobs, so it can't free a slot an orphan names.
+    let pool = Pool("db".into());
+    let mut orphan = ticket("orphan", 0, Class::Light, State::Running);
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = false;
+    orphan.slots.insert(pool.clone(), 1);
+    let mut snap = snapshot(vec![
+        ticket("running", 0, Class::Light, State::Running),
+        orphan,
+        lapsed_asking(&pool),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_whose_slot_a_living_job_holds_drains_the_machine() {
+    let pool = Pool("db".into());
+    let mut holder = ticket("holder", 0, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 1);
+    let mut snap = snapshot(vec![
+        holder,
+        lapsed_asking(&pool),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn an_unreadable_tickets_heavy_minimum_counts_toward_what_a_drain_frees() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 0);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 12_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut snap = snapshot(vec![
+        running,
+        lapsed,
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.unreadable = 1;
+    snap.config.class_min.heavy = Resources::new(0, 4_000);
+    let load = snap.load.as_mut().unwrap();
+    load.mem_available_mb = Some(9_000);
+    load.jobs
+        .insert(TicketId("running".into()), Resources::new(1_000, 0));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn an_aged_ticket_kept_out_only_by_a_full_pool_holds_no_budget() {
+    let pool = Pool("db".into());
+    let mut holder = ticket("holder", 0, Class::Light, State::Running);
+    holder.reservation = Resources::new(1_000, 1_000);
+    holder.slots.insert(pool.clone(), 1);
+    let mut aged = ticket("aged", 1, Class::Light, State::Waiting);
+    aged.reservation = Resources::new(6_000, 1_000);
+    aged.waited_ms = 600_001;
+    aged.pools.insert(pool.clone());
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![holder, aged, mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_quiet_job_admitted_with_the_streak_after_a_long_wait_is_not_tainted() {
+    let mut mine = ticket("me", 1, Class::Quiet, State::Waiting);
+    mine.waited_ms = 3_600_001;
+    let mut snap = snapshot(vec![mine]);
+    snap.load.as_mut().unwrap().quiet_streak = 5;
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_quiet_job_a_drain_let_in_first_without_the_streak_is_tainted() {
+    let mut mine = ticket("me", 1, Class::Quiet, State::Waiting);
+    mine.waited_ms = 3_600_001;
+    mine.reservation = Resources::new(8_000, 1_000);
+    let mut snap = snapshot(vec![mine]);
+    snap.load.as_mut().unwrap().cpu_used_millicores = Some(3_000);
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            first_in: true,
+            tainted: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn a_ticket_behind_a_quiet_job_admitted_on_paper_says_so() {
+    let mut snap = snapshot(vec![
+        ticket("quiet", 1, Class::Quiet, State::Waiting),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.load.as_mut().unwrap().quiet_streak = 2;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::BehindQuiet(TicketId("quiet".into())))
+    );
+}
+
+#[test]
+fn a_stalled_ticket_deciding_for_itself_is_told_it_is_stalled() {
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.last_pass = BootTime(NOW.0 - 10_001);
+
+    assert_eq!(
+        decide(&snapshot(vec![mine]), &me()),
+        Decision::Wait(Reason::Stalled)
+    );
+}
+
+// MT-024 (Nick, 2026-10-16): with no reliable load, a quiet job keeps its normal rule.
+
+#[test]
+fn with_no_load_file_a_quiet_ticket_not_yet_due_waits() {
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Quiet, State::Waiting)]);
+    snap.load = None;
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::QuietNeedsIdle));
+}
+
+#[test]
+fn with_no_load_file_a_due_quiet_ticket_is_admitted_tainted() {
+    let mut mine = ticket("me", 1, Class::Quiet, State::Waiting);
+    mine.waited_ms = 3_600_001;
+    let mut snap = snapshot(vec![mine]);
+    snap.load = None;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            tainted: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn with_no_load_file_a_quiet_ticket_not_yet_due_does_not_hold_the_line() {
+    let mut snap = snapshot(vec![
+        ticket("quiet", 1, Class::Quiet, State::Waiting),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.load = None;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn with_a_sample_marked_not_fresh_a_quiet_ticket_not_yet_due_waits() {
+    // The first sample after a wake: the machine's wake-up burst is no time for a benchmark.
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Quiet, State::Waiting)]);
+    let load = snap.load.as_mut().unwrap();
+    load.fresh = false;
+    load.quiet_streak = 9;
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::QuietNeedsIdle));
 }

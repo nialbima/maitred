@@ -27,8 +27,9 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Whether any ticket (or its stop marker) was recreated within the stall limit: other deleted
-    /// files may not have come back yet, so nobody is admitted or chosen.
+    /// Whether any ticket was recreated within the stall limit: other deleted files may not have
+    /// come back yet, so nobody is admitted or chosen. A holder recreating its stop marker sets its
+    /// ticket's `recreated_at`, so a marker's recreation shows here too.
     #[must_use]
     pub fn recreated_recently(&self) -> bool {
         self.tickets
@@ -38,7 +39,7 @@ impl Snapshot {
     }
 
     /// The load, if it is fresh (not the first sample after a sleep), recent enough, and has its
-    /// critical readings (CPU and memory).
+    /// critical readings, CPU use and available memory (ARCHITECTURE, Critical readings).
     pub(crate) fn reliable_load(&self) -> Option<Reliable> {
         let load = self.load.as_ref()?;
         if !load.fresh || self.now.since(load.sampled_at) > self.config.load_freshness_ms() {
@@ -47,7 +48,7 @@ impl Snapshot {
         Some(Reliable {
             capacity: load.capacity,
             cpu_used_millicores: load.cpu_used_millicores?,
-            cpu_pressure: load.cpu_pressure?,
+            cpu_pressure: load.cpu_pressure,
             mem_available_mb: load.mem_available_mb?,
             gpu_utilization: load.gpu_utilization,
             quiet_streak: load.quiet_streak,
@@ -61,7 +62,8 @@ impl Snapshot {
 pub(crate) struct Reliable {
     pub(crate) capacity: Resources,
     pub(crate) cpu_used_millicores: u64,
-    pub(crate) cpu_pressure: f64,
+    /// Not a critical reading: missing, it turns off only the CPU live limit.
+    pub(crate) cpu_pressure: Option<f64>,
     pub(crate) mem_available_mb: u64,
     pub(crate) gpu_utilization: Option<f64>,
     pub(crate) quiet_streak: u32,

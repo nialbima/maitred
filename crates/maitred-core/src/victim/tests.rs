@@ -538,3 +538,22 @@ fn a_job_measured_exactly_at_its_reservation_does_not_go_before_the_recency_orde
         Some(id("heavy"))
     );
 }
+
+#[test]
+fn a_missing_cpu_pressure_reading_leaves_the_memory_kill_on() {
+    let mut snap = snapshot(vec![]);
+    short_of_memory(&mut snap);
+    snap.load.as_mut().unwrap().cpu_pressure = None;
+
+    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: false }));
+}
+
+#[test]
+fn a_missing_cpu_use_reading_turns_the_kill_policy_off() {
+    // CPU use is critical: with it missing the load can't be relied on, for kills as for admission.
+    let mut snap = snapshot(vec![]);
+    short_of_memory(&mut snap);
+    snap.load.as_mut().unwrap().cpu_used_millicores = None;
+
+    assert_eq!(trigger(&snap), None);
+}
