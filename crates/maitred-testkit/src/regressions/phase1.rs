@@ -5,8 +5,8 @@
 //! 1 s stall limit. Each scenario's comment works its numbers from "Inside `decide`" (ARCHITECTURE.md).
 
 use maitred_scenario::{
-    Class, ClassCase, Expect, Fault, Hook, Job, MachineConfig, MatchExpect, Process, Reading,
-    Sample, Scenario, Signal, Trigger, ms, secs,
+    Class, ClassCase, End, Expect, Fault, Hook, Job, MachineConfig, MatchExpect, PausePoint,
+    Process, Reading, Sample, Scenario, Signal, Trigger, ms, secs,
 };
 
 /// The admission scenarios of phase 1.
@@ -41,6 +41,8 @@ pub fn admission() -> Vec<Scenario> {
         on_linux_cpu_stall_over_its_ceiling_holds_admission(),
         on_macos_runnable_work_under_its_ceiling_doesnt_hold_admission(),
         the_first_sample_after_a_sampler_gap_doesnt_count_toward_quiet(),
+        a_supervisor_killed_mid_kill_leaves_a_killed_record_and_no_requeue(),
+        a_cancel_during_a_kill_doesnt_stop_the_kill(),
     ]
 }
 
@@ -805,6 +807,53 @@ fn the_first_sample_after_a_sampler_gap_doesnt_count_toward_quiet() -> Scenario 
     .expect(Expect::not_admitted_before("q", ms(2_800)))
     .expect(Expect::admitted_by("q", ms(3_100)))
     .run_until(secs(4))
+}
+
+/// A job over its reservation in a memory breach, for the mid-kill scenarios: `v` reserves 1000 MB and uses 3100;
+/// outside load reaches 13000 MB at 2 s, leaving 16384 - 13000 - 3100 = 284 MB, under `kill_floor` (512), and `v` is
+/// the only candidate.
+fn breach_with_one_victim(name: &str) -> Scenario {
+    Scenario::new(name, MachineConfig::for_tests())
+        .load(Sample::at(ms(0)))
+        .load(Sample::at(secs(2)).background(0, 13_000))
+        .arrive(
+            ms(0),
+            Job::new("v", Class::Light)
+                .reserves(500, 1_000)
+                .uses(500, 3_100)
+                .runs_for(secs(30)),
+        )
+        .run_until(secs(6))
+}
+
+/// ARCHITECTURE rev 201 (Nick, 2026-10-16): an orphan's kill is finished by its holder, which writes the record itself
+/// (killed, then the ticket, then its marker), and the job isn't queued again. `v`'s supervisor is killed the moment
+/// its holder has created and locked the stop marker. Queued again would show as `v` admitted twice, which the judge
+/// always fails.
+fn a_supervisor_killed_mid_kill_leaves_a_killed_record_and_no_requeue() -> Scenario {
+    breach_with_one_victim(
+        "a supervisor killed mid-kill leaves a killed record and nothing queued again",
+    )
+    .checks("MT-045")
+    .fault_at(
+        PausePoint::StopMarked,
+        Fault::signal("v", Process::Supervisor, Signal::Kill),
+    )
+    .expect(Expect::killed("v", Trigger::Memory))
+    .expect(Expect::ends("v", End::Killed(Trigger::Memory)))
+    .expect(Expect::at_most_kills(Trigger::Memory, 1))
+}
+
+/// ARCHITECTURE rev 201 (Nick, 2026-10-16): a cancel while the job is being killed doesn't end it; the kill finishes
+/// and the record says killed, with the flag cancelled-during-kill (rev 202). `v` is cancelled the moment its holder
+/// has created and locked the stop marker.
+fn a_cancel_during_a_kill_doesnt_stop_the_kill() -> Scenario {
+    breach_with_one_victim("a cancel during a kill doesn't stop it: the record says killed")
+        .checks("MT-045")
+        .fault_at(PausePoint::StopMarked, Fault::cancel("v", "mid-kill"))
+        .expect(Expect::ends("v", End::Killed(Trigger::Memory)))
+        .expect(Expect::record_flag("v", "cancelled-during-kill"))
+        .expect(Expect::at_most_kills(Trigger::Memory, 1))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

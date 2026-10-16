@@ -8,6 +8,7 @@ use crate::job::Job;
 use crate::load::Sample;
 use crate::machine::MachineConfig;
 use crate::outcome::Outcome;
+use crate::pause::PausePoint;
 use crate::time::Ms;
 
 /// Something that happens at a moment in the scenario.
@@ -91,6 +92,10 @@ pub struct Scenario {
     /// event at that moment, so a job arriving at 0 meets a load file, not the no-load fallback.
     pub events: Vec<(Ms, Event)>,
     pub expectations: Vec<Expect>,
+    /// Faults done when the fault's job first reaches a pause point, rather than at a time: for a moment no time can
+    /// name, such as mid-kill. The real runner pauses the process there, does the fault, and says go; the simulator
+    /// does the fault at the matching step.
+    pub point_faults: Vec<(PausePoint, Fault)>,
     /// When the run stops. `None` means once every job that started has ended and no event is left. A scenario
     /// expecting a job never to start needs one, since that job never ends.
     pub until: Option<Ms>,
@@ -107,6 +112,7 @@ impl Scenario {
             trace: Vec::new(),
             events: Vec::new(),
             expectations: Vec::new(),
+            point_faults: Vec::new(),
             until: None,
         }
     }
@@ -173,6 +179,13 @@ impl Scenario {
     #[must_use]
     pub fn fault(self, at: Ms, fault: Fault) -> Self {
         self.at(at, Event::Fault(fault))
+    }
+
+    /// `fault` happens when its job first reaches `point`.
+    #[must_use]
+    pub fn fault_at(mut self, point: PausePoint, fault: Fault) -> Self {
+        self.point_faults.push((point, fault));
+        self
     }
 
     #[must_use]
@@ -273,6 +286,11 @@ impl Scenario {
                     }
                     Some(_) => {}
                 }
+            }
+        }
+        for (_, fault) in &self.point_faults {
+            if !seen.contains(fault.label()) {
+                problems.push(Invalid::UnknownLabel(fault.label().into()));
             }
         }
         for expectation in &self.expectations {

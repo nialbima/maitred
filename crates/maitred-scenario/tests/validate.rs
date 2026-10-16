@@ -617,3 +617,26 @@ fn a_quiet_threshold_not_strictly_between_0_and_1_is_refused() {
         );
     }
 }
+
+#[test]
+fn a_fault_at_a_pause_point_naming_an_unknown_job_is_refused() {
+    let scenario = one_job_on(machine()).fault_at(
+        maitred_scenario::PausePoint::StopMarked,
+        Fault::cancel("ghost", "no such job"),
+    );
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::UnknownLabel("ghost".into())])
+    );
+}
+
+#[test]
+fn a_fault_at_a_pause_point_naming_a_known_job_is_accepted() {
+    let scenario = one_job_on(machine()).fault_at(
+        maitred_scenario::PausePoint::StopMarked,
+        Fault::cancel("a", "mid-kill"),
+    );
+
+    assert_eq!(scenario.validate(), Ok(()));
+}
