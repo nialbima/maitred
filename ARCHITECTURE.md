@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 192, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 201, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -59,15 +59,17 @@ A ticket has three written states, an end, one marked state and one computed sta
 | waiting | admitted | `decide` admits it; its slots are taken | its supervisor, under `admit.lock` |
 | admitted | running | the supervisor writes the holder's pid, session and start time into the ticket, then opens the gate; the holder forks the job and execs the command | its supervisor |
 | running | stopping | `choose_victim` names it | its holder, under `admit.lock`: it creates and locks the stop marker |
-| stopping | ended | the job's processes are gone (or a bounded wait has passed) and the sampler has published a sample whose interval began after that: record first, then the ticket, then the marker | the supervisor, then the holder |
-| running | ended | the job exits, is cancelled or signalled: record first, then delete | its supervisor |
-| waiting or admitted | ended | cancelled, timed out, signalled, or the spawn failed: record first, then delete; the parked holder sees its gate close and exits | its supervisor |
+| stopping | ended | the job's processes are gone (or a bounded wait has passed) and the sampler has published a sample whose interval began after that: record first, then the ticket, then the marker. A cancel or a signal to the supervisor meanwhile doesn't end it: the kill finishes, and the record says killed, noting the cancel or signal (Nick, 2026-10-16) | the supervisor, then the holder |
+| running | ended | the job exits (completed), is cancelled, is signalled (stopped by signal) or loses its holder (holder lost; mid-kill too, when the supervisor stops the session itself and removes the dead holder's marker after the ticket): record first, then delete | its supervisor |
+| waiting or admitted | ended | cancelled, timed out (waiting only: --timeout passes before admission), signalled (abandoned), or the spawn failed (admitted only): record first, then delete; the parked holder sees its gate close and exits | its supervisor |
 | any | orphaned (computed) | its supervisor dies; the kernel frees the lock | nobody: readers see the free lock |
 | orphaned, waiting | waiting | adopted (same project and uid, the command still matches, confirmed interactively); the old parked holder has already exited, and the adopter starts a new one | the adopter, who now holds the lock |
 | orphaned, admitted | waiting | adopted, keeping its `seq`. Its slots are dropped, since a waiting ticket holds none. No job ran: a holder at its gate exits when its supervisor's end of the gate closes | the adopter |
-| orphaned, running or stopping, record present | removed | the job had finished; only the deletion was lost | any later supervisor of the same uid in the same project (the sweep), or `wait` |
-| orphaned, running or stopping, session alive | (unchanged) | adoption is refused: the job is still running, and adopting would run it twice. Its holder still measures it and carries out a kill | nobody |
-| orphaned, running or stopping, session gone, no record | ended + new waiting ticket | adopted: the record says `interrupted`; the command is queued again as a new ticket | the adopter |
+| orphaned, any state, record present | removed | its supervisor died between the record and the deletion: the ticket is deleted, and nothing new is written, since a record is created exclusively | any later supervisor of the same uid in the same project (the sweep), or `wait` |
+| orphaned, running or stopping, session or holder alive | (unchanged) | adoption and expiry are refused: the job, or its holder's kill, is still running, and adopting would run it twice or queue again a job being shed. Its holder still measures it and carries out a kill | nobody |
+| orphaned, running, session gone, no record, no stop marker | ended + new waiting ticket | adopted: the record says `interrupted`; the command is queued again as a new ticket | the adopter |
+| orphaned, stopping | ended | its holder carries out the kill and, with no supervisor to do it, writes the record itself: killed, then the ticket, then its marker; the job isn't queued again (Nick, 2026-10-16) | its holder |
+| orphaned, stopping, holder gone, no record | ended | a marker nobody holds shows a kill was started: the record says killed, never interrupted, and the job isn't queued again | the adopter, or the sweep |
 | orphaned | removed | past `orphan_ttl`, and not running with a live session: the sweep writes an `expired` record into the project first | the sweep of the next supervisor of the same uid in the same project |
 
 Three invariants follow, and the tests check each: a ticket's file only changes while someone holds its lock; no job runs whose session isn't already in its ticket; and no ticket disappears before its record exists. A record is created exclusively (written under a temporary name, then linked into place, which fails if one exists), so two writers can never both write one. So `wait` on an id always ends: with the record, or, if there is neither ticket nor record, with the outcome `lost`.
@@ -203,7 +205,7 @@ A project's records live in its working tree, `.maitred/records/<id>/`, which th
 | File | Holds | Written |
 | --- | --- | --- |
 | `job.json` | command line, working directory, environment keys, resolved class, the class file's and checker's hashes and whether each differed from the committed copy | once, at enqueue |
-| `record.json` | the ticket's last payload, start and end, exit status or signal, how it ended (completed, cancelled with sender and reason, timed out, killed with its threshold, interrupted, holder lost, expired, lost), sleep seconds, overuse, nested runs, the samples around it, flags | once, before the ticket is deleted, created exclusively |
+| `record.json` | the ticket's last payload, start and end, exit status or signal, how it ended (completed, cancelled with sender and reason, timed out, abandoned, stopped by signal, spawn failed, killed with its threshold, interrupted, holder lost, expired; lost is wait's answer when there is neither ticket nor record, never written), sleep seconds, overuse, nested runs, the samples around it, flags | once, before the ticket is deleted, created exclusively |
 | `log` | head and tail of the job's output, capped (default 64 KiB each) | while the job runs, and by the drain afterwards |
 
 ### The sampler's files
