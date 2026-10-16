@@ -83,6 +83,8 @@ pub struct Ticket {
     pub waited_ms: u64,
     /// When its owner last started a pass.
     pub last_pass: BootTime,
+    /// When its holder last started a pass, from its use file; none before the first (MT-043).
+    pub holder_pass: Option<BootTime>,
     pub admitted_at: Option<BootTime>,
     pub recreated_at: Option<BootTime>,
 }

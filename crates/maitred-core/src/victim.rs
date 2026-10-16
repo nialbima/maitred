@@ -59,7 +59,11 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
     if !snap.live_stop_markers.is_empty() || snap.recreated_recently() {
         return None;
     }
-    let candidates: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_candidate(t)).collect();
+    let candidates: Vec<&Ticket> = snap
+        .tickets
+        .iter()
+        .filter(|t| is_candidate(snap, t))
+        .collect();
 
     let dimension: Option<fn(Resources) -> u64> = match trigger {
         Trigger::Memory { .. } => Some(|r| r.mem_mb),
@@ -112,10 +116,27 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
     })
 }
 
-/// A running job of this boot and namespace whose holder is alive, living or orphaned: only its
-/// holder can carry out a kill.
-fn is_candidate(t: &Ticket) -> bool {
-    t.state == State::Running && t.holder_alive && t.is_this_boot()
+/// A running job of this boot and namespace whose holder is alive and still passing, living or
+/// orphaned: only its holder can carry out a kill.
+fn is_candidate(snap: &Snapshot, t: &Ticket) -> bool {
+    t.state == State::Running && t.holder_alive && t.is_this_boot() && !holder_stopped(snap, t)
+}
+
+/// Whether a job's holder hasn't passed within the stall limit (three of them without reliable
+/// load), judged from its admission before its first pass. A SIGSTOP can't be ignored, and a
+/// stopped holder can't act (MT-043). Nobody is judged so until a stall limit after a wake.
+fn holder_stopped(snap: &Snapshot, t: &Ticket) -> bool {
+    if snap.woke_recently() {
+        return false;
+    }
+    let limit = if snap.reliable_load().is_some() {
+        snap.config.stall_limit_ms()
+    } else {
+        snap.config.stall_limit_ms().saturating_mul(3)
+    };
+    t.holder_pass
+        .or(t.admitted_at)
+        .is_some_and(|at| snap.now.since(at) > limit)
 }
 
 /// How far a job's use in the sample is over its reservation on one resource, if it is over. A job

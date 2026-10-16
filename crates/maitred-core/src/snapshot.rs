@@ -51,6 +51,18 @@ impl Snapshot {
             .any(|at| self.now.since(at) < self.config.stall_limit_ms())
     }
 
+    /// Whether the machine woke within the stall limit, so nobody is judged stalled yet: by the
+    /// sampler's `woke_at`, or by this process's own wake (a gap in its passes), which needs no
+    /// sampler and covers the pre-sleep load file a waker reads first.
+    pub(crate) fn woke_recently(&self) -> bool {
+        self.load
+            .as_ref()
+            .and_then(|l| l.woke_at)
+            .into_iter()
+            .chain(self.my_wake)
+            .any(|w| self.now.since(w) < self.config.stall_limit_ms())
+    }
+
     /// The load, if it is fresh (not the first sample after a sleep), recent enough, and has its
     /// critical readings, CPU use and available memory (ARCHITECTURE, Critical readings).
     pub(crate) fn reliable_load(&self) -> Option<Reliable> {

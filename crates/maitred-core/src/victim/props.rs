@@ -21,7 +21,22 @@ proptest! {
     fn the_victim_is_a_running_job_of_this_boot_whose_holder_is_alive(snap in snapshot(), trigger in triggers()) {
         if let Some(victim) = choose_victim(&snap, trigger) {
             let t = snap.tickets.iter().find(|t| t.id == victim).expect("the victim is one of the snapshot's tickets");
-            prop_assert!(is_candidate(t));
+            prop_assert!(is_candidate(&snap, t));
+        }
+    }
+
+    /// MT-043: the victim's holder has passed within the stall limit (three without reliable
+    /// load; from its admission before its first pass), unless the machine woke within one.
+    #[test]
+    fn the_victims_holder_is_still_passing(snap in snapshot(), trigger in triggers()) {
+        if let Some(victim) = choose_victim(&snap, trigger) {
+            let t = snap.tickets.iter().find(|t| t.id == victim).expect("the victim is one of the snapshot's tickets");
+            let stall = snap.config.stall_limit_ms();
+            let woke = snap.load.as_ref().and_then(|l| l.woke_at).into_iter().chain(snap.my_wake)
+                .any(|w| snap.now.since(w) < stall);
+            let limit = if snap.reliable_load().is_some() { stall } else { stall * 3 };
+            let last = t.holder_pass.or(t.admitted_at).expect("a running ticket was admitted");
+            prop_assert!(woke || snap.now.since(last) <= limit);
         }
     }
 
@@ -71,7 +86,7 @@ proptest! {
             return Ok(());
         }
         let Some(victim) = choose_victim(&snap, trigger) else { return Ok(()) };
-        let candidates: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_candidate(t)).collect();
+        let candidates: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_candidate(&snap, t)).collect();
         let chosen = candidates.iter().find(|t| t.id == victim).expect("the victim is a candidate");
         let furthest = candidates.iter().filter_map(|t| over_by(&snap, t, trigger)).max();
         if let Some(most) = furthest {
@@ -98,8 +113,8 @@ proptest! {
     fn a_named_victim_stands_while_it_is_eligible(snap in snapshot(), trigger in triggers()) {
         let Some(named) = snap.named_victim.clone() else { return Ok(()) };
         let critical = matches!(trigger, Trigger::Memory { critical: true } | Trigger::Cpu { critical: true });
-        let any_over = snap.tickets.iter().any(|t| is_candidate(t) && over_by(&snap, t, trigger).is_some());
-        let named_ticket = snap.tickets.iter().find(|t| t.id == named && is_candidate(t));
+        let any_over = snap.tickets.iter().any(|t| is_candidate(&snap, t) && over_by(&snap, t, trigger).is_some());
+        let named_ticket = snap.tickets.iter().find(|t| t.id == named && is_candidate(&snap, t));
         let named_over = named_ticket.is_some_and(|t| over_by(&snap, t, trigger).is_some());
         let eligible = named_ticket.is_some_and(|t| {
             named_over || (!any_over && (t.class != Class::Quiet || critical))
