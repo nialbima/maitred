@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Config, Position, Resources, Ticket, TicketId, Wall};
 
@@ -21,6 +21,52 @@ pub struct Snapshot {
     /// Tickets an administrator moved (`maitred queue move`), from the machine root's `order` file:
     /// each sorts at its position instead of `(seq, 0)`. Ids with no ticket are ignored.
     pub moved: BTreeMap<TicketId, Position>,
+    /// Tickets whose stop marker exists and is locked: a kill is under way. A marker whose lock is
+    /// free belongs to a dead holder and isn't here.
+    pub live_stop_markers: BTreeSet<TicketId>,
+}
+
+impl Snapshot {
+    /// Whether any ticket (or its stop marker) was recreated within the stall limit: other deleted
+    /// files may not have come back yet, so nobody is admitted or chosen.
+    #[must_use]
+    pub fn recreated_recently(&self) -> bool {
+        self.tickets
+            .iter()
+            .filter_map(|t| t.recreated_at)
+            .any(|at| self.now.since(at) < self.config.stall_limit_ms())
+    }
+
+    /// The load, if it is fresh (not the first sample after a sleep), recent enough, and has its
+    /// critical readings (CPU and memory).
+    pub(crate) fn reliable_load(&self) -> Option<Reliable> {
+        let load = self.load.as_ref()?;
+        if !load.fresh || self.now.since(load.sampled_at) > self.config.load_freshness_ms() {
+            return None;
+        }
+        Some(Reliable {
+            capacity: load.capacity,
+            cpu_used_millicores: load.cpu_used_millicores?,
+            cpu_pressure: load.cpu_pressure?,
+            mem_available_mb: load.mem_available_mb?,
+            gpu_utilization: load.gpu_utilization,
+            quiet_streak: load.quiet_streak,
+            over_cpu_streak: load.over_cpu_streak,
+            over_gpu_streak: load.over_gpu_streak,
+        })
+    }
+}
+
+/// The load figures `decide` and the kill policy need, once they can be relied on.
+pub(crate) struct Reliable {
+    pub(crate) capacity: Resources,
+    pub(crate) cpu_used_millicores: u64,
+    pub(crate) cpu_pressure: f64,
+    pub(crate) mem_available_mb: u64,
+    pub(crate) gpu_utilization: Option<f64>,
+    pub(crate) quiet_streak: u32,
+    pub(crate) over_cpu_streak: u32,
+    pub(crate) over_gpu_streak: u32,
 }
 
 /// The sampler's latest sample, as `load/now.json` holds it.
@@ -38,6 +84,10 @@ pub struct Load {
     /// GPU utilisation, 0 to 1; `None` on a machine with no readable GPU.
     pub gpu_utilization: Option<f64>,
     pub quiet_streak: u32,
+    /// Consecutive samples over `cpu_kill_ceiling`, counted only from after the last victim was gone.
+    pub over_cpu_streak: u32,
+    /// Consecutive samples over `gpu_kill_ceiling`, counted the same way.
+    pub over_gpu_streak: u32,
     /// Each running job's use, as the sampler copied it from the job's holder. Only measurements
     /// whose window overlaps the sample's own interval are copied.
     pub jobs: BTreeMap<TicketId, Resources>,

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::snapshot::Reliable;
 use crate::{Class, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId, Wall};
 
 #[cfg(test)]
@@ -81,18 +82,13 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
         return Decision::Wait(Reason::NotWaiting);
     }
 
-    if snap
-        .tickets
-        .iter()
-        .filter_map(|t| t.recreated_at)
-        .any(|at| snap.now.since(at) < config.stall_limit_ms())
-    {
+    if snap.recreated_recently() {
         return Decision::Wait(Reason::TicketsRecreated);
     }
 
     let charged: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_charged(t)).collect();
 
-    let Some(load) = reliable_load(snap) else {
+    let Some(load) = snap.reliable_load() else {
         // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
         let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
         let first = waiting(snap, false).first().map(|t| &t.id);
@@ -184,41 +180,14 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
     Decision::Wait(Reason::NotWaiting)
 }
 
-/// The load figures `decide` needs, once it has checked they can be relied on.
-struct Reliable {
-    capacity: Resources,
-    cpu_used_millicores: u64,
-    cpu_pressure: f64,
-    mem_available_mb: u64,
-    gpu_utilization: Option<f64>,
-    quiet_streak: u32,
-}
-
-/// The load, if it is fresh, recent enough and has its critical readings (CPU and memory).
-fn reliable_load(snap: &Snapshot) -> Option<Reliable> {
-    let load = snap.load.as_ref()?;
-    if !load.fresh || snap.now.since(load.sampled_at) > snap.config.load_freshness_ms() {
-        return None;
-    }
-    Some(Reliable {
-        capacity: load.capacity,
-        cpu_used_millicores: load.cpu_used_millicores?,
-        cpu_pressure: load.cpu_pressure?,
-        mem_available_mb: load.mem_available_mb?,
-        gpu_utilization: load.gpu_utilization,
-        quiet_streak: load.quiet_streak,
-    })
-}
-
 /// Charged: living tickets admitted or running, and running orphans of this boot whose holder is
 /// alive. (Unreadable tickets are charged too; the snapshot only counts them.)
 fn is_charged(t: &Ticket) -> bool {
     match t.liveness {
         Liveness::Living => matches!(t.state, State::Admitted | State::Running),
-        Liveness::Orphaned {
-            holder_alive,
-            this_boot,
-        } => holder_alive && this_boot && t.state == State::Running,
+        Liveness::Orphaned { this_boot } => {
+            t.holder_alive && this_boot && t.state == State::Running
+        }
     }
 }
 
@@ -324,9 +293,7 @@ impl<'a> Walk<'a> {
     }
 
     fn reserve_class(&self, class: Class, asked: Resources) -> Resources {
-        asked
-            .max(self.snap.config.class_min.of(class))
-            .min(self.capacity)
+        self.snap.config.reserve(class, asked, self.capacity)
     }
 
     fn reserve(&self, t: &Ticket) -> Resources {

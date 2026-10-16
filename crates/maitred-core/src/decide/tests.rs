@@ -23,8 +23,12 @@ fn config() -> Config {
         stall_polls: 5,
         load_freshness_samples: 3,
         mem_floor_mb: 1_000,
+        kill_floor_mb: 500,
+        mem_critical_mb: 200,
         cpu_ceiling: 1.5,
         gpu_ceiling: 0.9,
+        cpu_kill_samples: 3,
+        gpu_kill_samples: 3,
         max_running_heavy: 2,
         quiet_streak_needed: 2,
         class_min: ClassMinimums::default(),
@@ -44,6 +48,8 @@ fn load() -> Load {
         mem_available_mb: Some(16_000),
         gpu_utilization: None,
         quiet_streak: 0,
+        over_cpu_streak: 0,
+        over_gpu_streak: 0,
         jobs: BTreeMap::new(),
     }
 }
@@ -55,6 +61,7 @@ fn ticket(id: &str, seq: u64, class: Class, state: State) -> Ticket {
         class,
         state,
         liveness: Liveness::Living,
+        holder_alive: true,
         reservation: Resources::new(1_000, 1_000),
         pools: BTreeSet::new(),
         slots: BTreeMap::new(),
@@ -74,6 +81,7 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         unreadable: 0,
         last_heavy: None,
         moved: BTreeMap::new(),
+        live_stop_markers: BTreeSet::new(),
     }
 }
 
@@ -179,10 +187,8 @@ fn with_no_load_file_an_unreadable_ticket_counts_as_charged() {
 fn with_no_load_file_a_charged_orphan_does_not_keep_everyone_out() {
     // As for first in: an orphan that never ends must not hold the queue for ever.
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: true,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = true;
     let mut snap = snapshot(vec![orphan, ticket("me", 2, Class::Light, State::Waiting)]);
     snap.load = None;
 
@@ -338,10 +344,8 @@ fn nothing_starts_beside_a_running_quiet_job() {
 #[test]
 fn an_orphaned_quiet_job_does_not_stop_the_queue() {
     let mut quiet = ticket("quiet", 1, Class::Quiet, State::Running);
-    quiet.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: true,
-    };
+    quiet.liveness = Liveness::Orphaned { this_boot: true };
+    quiet.holder_alive = true;
     let snap = snapshot(vec![quiet, ticket("me", 2, Class::Light, State::Waiting)]);
 
     assert_eq!(decide(&snap, &me()), admitted());
@@ -455,10 +459,8 @@ fn a_reservation_below_its_class_minimum_is_raised_to_it() {
 #[test]
 fn an_orphan_whose_holder_is_alive_is_charged_its_reservation() {
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: true,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = true;
     orphan.reservation = Resources::new(5_000, 1_000);
     // A living job that reserves nothing, so first-in doesn't apply and the budget decides.
     let mut living = ticket("living", 0, Class::Light, State::Running);
@@ -480,10 +482,8 @@ fn an_orphan_whose_holder_is_alive_is_charged_its_reservation() {
 #[test]
 fn an_orphan_whose_holder_is_gone_is_not_charged() {
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: false,
-        this_boot: true,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = false;
     orphan.reservation = Resources::new(5_000, 1_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(4_000, 1_000);
@@ -494,10 +494,8 @@ fn an_orphan_whose_holder_is_gone_is_not_charged() {
 #[test]
 fn an_orphan_from_another_boot_is_not_charged() {
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: false,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: false };
+    orphan.holder_alive = true;
     orphan.reservation = Resources::new(5_000, 1_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(4_000, 1_000);
@@ -582,10 +580,8 @@ fn first_in_does_not_apply_once_a_ticket_was_admitted_earlier_in_the_walk() {
 #[test]
 fn a_charged_orphan_does_not_block_first_in() {
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: true,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = true;
     let mut mine = ticket("me", 2, Class::Heavy, State::Waiting);
     mine.reservation = Resources::new(64_000, 1_000);
     let snap = snapshot(vec![orphan, mine]);
@@ -603,10 +599,8 @@ fn a_charged_orphan_does_not_block_first_in() {
 fn first_in_never_waives_a_slot() {
     let pool = Pool("test_env".into());
     let mut holder = ticket("holder", 1, Class::Light, State::Running);
-    holder.liveness = Liveness::Orphaned {
-        holder_alive: false,
-        this_boot: true,
-    };
+    holder.liveness = Liveness::Orphaned { this_boot: true };
+    holder.holder_alive = false;
     holder.slots.insert(pool.clone(), 1);
     let mut mine = ticket("me", 2, Class::Heavy, State::Waiting);
     mine.reservation = Resources::new(64_000, 64_000);
@@ -678,10 +672,8 @@ fn no_more_heavy_jobs_than_max_running_heavy() {
 #[test]
 fn an_orphaned_heavy_job_does_not_count_toward_max_running_heavy() {
     let mut orphan = ticket("orphan", 1, Class::Heavy, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: true,
-        this_boot: true,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.holder_alive = true;
     let mut snap = snapshot(vec![orphan, ticket("me", 2, Class::Heavy, State::Waiting)]);
     snap.config.max_running_heavy = 1;
 
@@ -1014,10 +1006,8 @@ fn a_slot_named_by_a_ticket_out_of_any_charge_is_still_not_free() {
     // "A slot no ticket names": an orphan whose holder is gone still names its slot.
     let pool = Pool("test_env".into());
     let mut orphan = ticket("orphan", 1, Class::Light, State::Running);
-    orphan.liveness = Liveness::Orphaned {
-        holder_alive: false,
-        this_boot: false,
-    };
+    orphan.liveness = Liveness::Orphaned { this_boot: false };
+    orphan.holder_alive = false;
     orphan.slots.insert(pool.clone(), 1);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.pools.insert(pool.clone());

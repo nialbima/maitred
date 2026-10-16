@@ -21,10 +21,19 @@ pub struct Config {
     /// How many sample intervals old the load file may be and still count as fresh.
     pub load_freshness_samples: u64,
     pub mem_floor_mb: u64,
+    /// Free memory below this triggers a kill (below the admission floor).
+    pub kill_floor_mb: u64,
+    /// Free memory below this lets the kill policy choose a quiet job.
+    pub mem_critical_mb: u64,
     /// Runnable work per core, over the last sample interval.
     pub cpu_ceiling: f64,
     /// GPU utilisation, 0 to 1.
     pub gpu_ceiling: f64,
+    /// How many consecutive samples over `cpu_kill_ceiling` trigger a kill; twice as many lets the
+    /// kill policy choose a quiet job.
+    pub cpu_kill_samples: u32,
+    /// How many consecutive samples over `gpu_kill_ceiling` trigger a kill.
+    pub gpu_kill_samples: u32,
     pub max_running_heavy: u32,
     /// The quiet streak, in samples, that lets a quiet job in.
     pub quiet_streak_needed: u32,
@@ -38,6 +47,13 @@ impl Config {
     #[must_use]
     pub fn stall_limit_ms(&self) -> u64 {
         self.stall_polls.saturating_mul(self.poll_interval_ms)
+    }
+
+    /// What a ticket of `class` that asked for `asked` holds: at least the class minimum, at most
+    /// the machine.
+    #[must_use]
+    pub fn reserve(&self, class: Class, asked: Resources, capacity: Resources) -> Resources {
+        asked.max(self.class_min.of(class)).min(capacity)
     }
 
     /// How old the load file may be and still count as fresh.

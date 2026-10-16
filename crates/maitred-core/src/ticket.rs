@@ -56,8 +56,6 @@ pub enum Liveness {
     Living,
     /// Its lock is free: the supervisor is gone.
     Orphaned {
-        /// Its holder's pid and start time still match and it isn't a zombie.
-        holder_alive: bool,
         /// It was written in this boot and pid namespace, so its pids mean something here.
         this_boot: bool,
     },
@@ -71,6 +69,9 @@ pub struct Ticket {
     pub class: Class,
     pub state: State,
     pub liveness: Liveness,
+    /// Its holder's pid and start time still match and it isn't a zombie (only a running or
+    /// stopping ticket has a holder doing anything). A holder can die while its supervisor lives.
+    pub holder_alive: bool,
     pub reservation: Resources,
     /// The pools its rule asks a slot of.
     pub pools: BTreeSet<Pool>,

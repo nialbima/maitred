@@ -12,10 +12,14 @@ mod config;
 mod decide;
 mod resources;
 mod snapshot;
+#[cfg(test)]
+mod testgen;
 mod ticket;
+mod victim;
 
 pub use config::{ClassMinimums, Config, PoolConfig};
 pub use decide::{Admission, Decision, Limit, Reason, decide};
 pub use resources::Resources;
 pub use snapshot::{Load, Snapshot};
 pub use ticket::{Class, Liveness, Pool, Position, State, Ticket, TicketId, Wall};
+pub use victim::{Trigger, choose_victim, trigger};
