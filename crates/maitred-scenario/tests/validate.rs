@@ -289,8 +289,9 @@ fn expectations_that_contradict_each_other_are_refused() {
         scenario.validate(),
         Err(vec![
             Invalid::Contradicts("a".into()),
-            Invalid::Contradicts("a".into()),
             Invalid::Contradicts("b".into()),
+            // The order cycle (a before b, b before a) is reported after the per-expectation checks.
+            Invalid::Contradicts("a".into()),
         ])
     );
 }
@@ -397,6 +398,44 @@ fn never_together_with_a_job_never_admitted_is_refused_as_unable_to_fail() {
     let scenario = two_jobs("together with nothing")
         .expect(Expect::never_admitted("a"))
         .expect(Expect::never_together("a", "b"));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::NeverFails("a".into())])
+    );
+}
+
+#[test]
+fn an_admitted_by_before_the_job_arrives_is_refused() {
+    let scenario = two_jobs("by a time before arrival").expect(Expect::admitted_by("b", secs(1)));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("b".into())])
+    );
+}
+
+#[test]
+fn a_cycle_of_admitted_before_of_any_length_is_refused() {
+    let scenario = Scenario::new("a cycle of three", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(1_000), Job::new("b", Class::Light))
+        .arrive(ms(2_000), Job::new("c", Class::Light))
+        .expect(Expect::admitted_before("a", "b"))
+        .expect(Expect::admitted_before("b", "c"))
+        .expect(Expect::admitted_before("c", "a"));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn at_most_together_that_never_admitted_jobs_make_unbreakable_is_refused() {
+    let scenario = two_jobs("a bound over a job that never runs")
+        .expect(Expect::never_admitted("a"))
+        .expect(Expect::at_most_together(1, &["a", "b"]));
 
     assert_eq!(
         scenario.validate(),

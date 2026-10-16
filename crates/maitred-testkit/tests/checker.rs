@@ -72,12 +72,12 @@ fn a_ticket_deleted_after_its_record_is_written_is_fine() {
     let (root, project) = roots();
     let mut checker = Checker::new(&root, &[&project]);
     let ticket = write_ticket(&root, "t1", 1);
-    checker.observe();
+    checker.observe(|_| false);
 
     write_record(&project, "t1");
     fs::remove_file(ticket).unwrap();
 
-    assert_eq!(checker.observe(), vec![]);
+    assert_eq!(checker.observe(|_| false), vec![]);
 }
 
 #[test]
@@ -85,12 +85,12 @@ fn a_ticket_gone_with_no_record_is_a_violation() {
     let (root, project) = roots();
     let mut checker = Checker::new(&root, &[&project]);
     let ticket = write_ticket(&root, "t1", 1);
-    checker.observe();
+    checker.observe(|_| false);
 
     fs::remove_file(ticket).unwrap();
 
     assert_eq!(
-        checker.observe(),
+        checker.observe(|_| false),
         vec![Violation::GoneWithoutRecord("t1".into())]
     );
 }
@@ -100,12 +100,12 @@ fn a_ticket_whose_generation_goes_back_is_a_violation() {
     let (root, project) = roots();
     let mut checker = Checker::new(&root, &[&project]);
     write_ticket(&root, "t1", 5);
-    checker.observe();
+    checker.observe(|_| false);
 
     write_ticket(&root, "t1", 4);
 
     assert_eq!(
-        checker.observe(),
+        checker.observe(|_| false),
         vec![Violation::GenerationWentBack {
             id: "t1".into(),
             from: 5,
@@ -157,7 +157,7 @@ fn two_live_stop_markers_are_a_violation() {
     let _b = locked(&second);
 
     assert_eq!(
-        checker.observe(),
+        checker.observe(|_| false),
         vec![Violation::TwoLiveStopMarkers(vec![
             "t1".into(),
             "t2".into()
@@ -174,7 +174,7 @@ fn a_stop_marker_whose_lock_is_free_doesnt_count_as_live() {
     fs::write(root.join("tickets/t2.stop"), "").unwrap();
     let _a = locked(&first);
 
-    assert_eq!(checker.observe(), vec![]);
+    assert_eq!(checker.observe(|_| false), vec![]);
 }
 
 #[test]
@@ -183,11 +183,33 @@ fn at_the_end_every_ticket_seen_has_its_record() {
     let mut checker = Checker::new(&root, &[&project]);
     write_ticket(&root, "t1", 1);
     write_ticket(&root, "t2", 1);
-    checker.observe();
+    checker.observe(|_| false);
     write_record(&project, "t1");
 
     assert_eq!(
         checker.finish(),
         vec![Violation::NoRecordAtEnd("t2".into())]
     );
+}
+
+#[test]
+fn a_write_with_the_lock_free_is_fine_once_the_record_exists() {
+    let (root, project) = roots();
+    let mut checker = Checker::new(&root, &[&project]);
+    write_ticket(&root, "t1", 1);
+    write_record(&project, "t1");
+
+    assert_eq!(checker.modified("t1", |_| false), vec![]);
+}
+
+#[test]
+fn a_ticket_a_fault_deleted_is_excused() {
+    let (root, project) = roots();
+    let mut checker = Checker::new(&root, &[&project]);
+    let ticket = write_ticket(&root, "t1", 1);
+    checker.observe(|_| false);
+
+    fs::remove_file(ticket).unwrap();
+
+    assert_eq!(checker.observe(|id| id == "t1"), vec![]);
 }

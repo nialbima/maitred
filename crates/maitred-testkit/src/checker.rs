@@ -6,6 +6,10 @@
 //! never claims to have seen every one. These are the invariants it can see without maitred's help; the ones that
 //! need the process table (a job running before its session is in its ticket, two live jobs holding one slot) come
 //! with the runner.
+//!
+//! The lock probe is the shared try-lock every liveness read already takes. While it is held, a writer's own
+//! non-blocking exclusive try fails and is retried, as it would be against any reader, so a runner probes on events,
+//! not in a loop.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, TryLockError};
@@ -54,8 +58,10 @@ impl Checker {
         }
     }
 
-    /// Looks at the whole root: tickets that appeared, went, or went back a generation, and live stop markers.
-    pub fn observe(&mut self) -> Vec<Violation> {
+    /// Looks at the whole root: tickets that appeared, went, or went back a generation, and live stop markers. A ticket
+    /// gone because the runner's own fault deleted it (`deleted_by_fault(id)`) isn't a violation: the Testing table
+    /// deletes whole tickets underneath on purpose.
+    pub fn observe(&mut self, deleted_by_fault: impl Fn(&str) -> bool) -> Vec<Violation> {
         let mut violations = Vec::new();
         let ids = self.files_ending(".tk");
         for id in &ids {
@@ -69,7 +75,7 @@ impl Checker {
             .collect();
         for id in gone {
             self.present.remove(&id);
-            if !self.has_record(&id) {
+            if !self.has_record(&id) && !deleted_by_fault(&id) {
                 violations.push(Violation::GoneWithoutRecord(id));
             }
         }
@@ -85,12 +91,13 @@ impl Checker {
     }
 
     /// Checks one ticket just reported modified: its exclusive lock must be held, unless `owner_gone(id)` says its
-    /// owner died after the modification (the runner knows from its fault log and the process table). Its
+    /// owner died after the modification (the runner knows from its fault log and the process table), or its record
+    /// already exists (a supervisor writes the record, then lets the lock go, then deletes the ticket). Its
     /// generation is checked too.
     pub fn modified(&mut self, id: &str, owner_gone: impl Fn(&str) -> bool) -> Vec<Violation> {
         let path = self.tickets.join(format!("{id}.tk"));
         let mut violations = Vec::new();
-        if path.exists() && !locked(&path) && !owner_gone(id) {
+        if path.exists() && !locked(&path) && !owner_gone(id) && !self.has_record(id) {
             violations.push(Violation::WrittenUnlocked(id.into()));
         }
         violations.extend(self.read_generation(id));

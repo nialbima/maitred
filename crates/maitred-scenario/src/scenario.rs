@@ -314,17 +314,24 @@ impl Scenario {
                     }
                 }
                 Expect::AdmittedBefore { first, second } => {
-                    let reversed = first < second
-                        && self
-                            .expectations
-                            .contains(&Expect::admitted_before(second, first));
                     // `first` can't be admitted before its earliest allowed time, nor `second` after its latest.
                     let impossible = matches!(
                         (self.earliest(first), self.latest(second)),
                         (Some(earliest), Some(latest)) if latest < earliest
                     );
-                    if reversed || impossible {
+                    if impossible {
                         problems.push(Invalid::Contradicts(first.clone()));
+                    }
+                }
+                Expect::AtMostTogether { allowed, labels } => {
+                    let never: Vec<&String> = labels
+                        .iter()
+                        .filter(|label| self.expectations.contains(&Expect::never_admitted(label)))
+                        .collect();
+                    if let Some(first) = never.first()
+                        && labels.len() - never.len() <= *allowed
+                    {
+                        problems.push(Invalid::NeverFails((*first).clone()));
                     }
                 }
                 Expect::Killed { label, trigger } => {
@@ -337,7 +344,8 @@ impl Scenario {
                     }
                 }
                 Expect::AdmittedBy { label, by }
-                    if self.earliest(label).is_some_and(|earliest| *by < earliest) =>
+                    if self.earliest(label).is_some_and(|earliest| *by < earliest)
+                        || self.arrival_of(label).is_some_and(|arrival| *by < arrival) =>
                 {
                     problems.push(Invalid::Contradicts(label.clone()));
                 }
@@ -349,7 +357,45 @@ impl Scenario {
                 problems.push(Invalid::StopsBeforeExpectation { until, named });
             }
         }
+        if let Some(label) = self.order_cycle() {
+            problems.push(Invalid::Contradicts(label));
+        }
         problems
+    }
+
+    /// A job on a cycle of `admitted_before` expectations (a before b, b before c, c before a), which no run can
+    /// satisfy: the least such label, so the problem is reported once.
+    fn order_cycle(&self) -> Option<String> {
+        let edges: Vec<(&str, &str)> = self
+            .expectations
+            .iter()
+            .filter_map(|e| match e {
+                Expect::AdmittedBefore { first, second } => Some((first.as_str(), second.as_str())),
+                _ => None,
+            })
+            .collect();
+        let reaches = |from: &str, to: &str| {
+            let mut seen = vec![from];
+            let mut frontier = vec![from];
+            while let Some(at) = frontier.pop() {
+                for (a, b) in &edges {
+                    if *a == at && !seen.contains(b) {
+                        if *b == to {
+                            return true;
+                        }
+                        seen.push(b);
+                        frontier.push(b);
+                    }
+                }
+            }
+            false
+        };
+        edges
+            .iter()
+            .filter(|(first, second)| reaches(second, first))
+            .flat_map(|(first, second)| [*first, *second])
+            .min()
+            .map(str::to_string)
     }
 
     /// The latest `not_admitted_before` time on `label`: it can't be admitted earlier.
