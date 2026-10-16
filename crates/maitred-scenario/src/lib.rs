@@ -5,6 +5,7 @@
 //! (`maitred-sim`) and the real-process runner (`maitred-testkit`) each run it and report an [`Outcome`],
 //! and [`Scenario::judge`] checks either one against the same expectations.
 
+mod class_case;
 mod expect;
 mod fault;
 mod job;
@@ -14,6 +15,7 @@ mod outcome;
 mod scenario;
 mod time;
 
+pub use class_case::{ClassCase, Expected, Hook, Input, InvalidCase, Matched};
 pub use expect::{Expect, Failure};
 pub use fault::{Fault, Process, Signal};
 pub use job::{Class, Job};
