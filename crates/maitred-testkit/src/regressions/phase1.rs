@@ -6,7 +6,7 @@
 
 use maitred_scenario::{
     Class, ClassCase, Expect, Fault, Hook, Job, MachineConfig, Matched, Process, Reading, Sample,
-    Scenario, Signal, ms, secs,
+    Scenario, Signal, Trigger, ms, secs,
 };
 
 /// The admission scenarios of phase 1.
@@ -21,6 +21,11 @@ pub fn admission() -> Vec<Scenario> {
         aged_ticket_kept_out_by_its_class_holds_nothing(),
         orphaned_quiet_job_doesnt_stop_the_queue(),
         quiet_job_waits_for_a_quiet_machine_without_holding_up_others(),
+        large_light_job_gets_in_under_steady_small_arrivals(),
+        memory_breach_kills_the_job_furthest_over_and_only_one(),
+        due_quiet_job_isnt_held_off_by_an_orphan(),
+        nobody_jumps_the_queue_after_the_machine_wakes(),
+        class_blocked_ticket_doesnt_drain_when_its_hold_lapses(),
     ]
 }
 
@@ -98,8 +103,8 @@ fn missing_memory_reading_falls_back_to_one_at_a_time() -> Scenario {
 /// never fit. After its aging (3 s) and aging hold (3 s more), its hold lapses. `b`, a small job behind it,
 /// must still start: a job that can never fit mustn't hold the queue for ever.
 ///
-/// As ARCHITECTURE rev 106 reads, a lapsed hold stops the walk and waits for first-in, which never waives
-/// memory, so `b` would wait for ever. This scenario states the outcome the finding asks for.
+/// A ticket drains the machine only if it "fits once drained" (ARCHITECTURE rev 111, Nick's decision on MT-019):
+/// at most 14384 MB plus what living charged tickets hold, short of 15000, so `a` waits without stopping the walk.
 fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
     Scenario::new(
         "a job that can never fit doesn't keep the jobs behind it out for ever",
@@ -192,6 +197,134 @@ fn quiet_job_waits_for_a_quiet_machine_without_holding_up_others() -> Scenario {
     .expect(Expect::admitted_by("l", ms(1_500)))
     .expect(Expect::not_admitted_before("q", secs(5)))
     .expect(Expect::admitted("q"))
+}
+
+/// Small light jobs, each reserving 4000 MB and using 64, arrive every 500 ms and run for 2 s, so about four run
+/// at once and free memory stays near 16384 - 4 x 64 - 4 x 3936 = 384 MB. `big` (8000 MB) never fits on its own.
+/// Once it has waited past `aging` (3 s), it holds its 8000 MB out of free, so the small ones fill only around
+/// it, and it starts as soon as the memory it holds is really free, within a couple of small jobs' lifetimes.
+fn large_light_job_gets_in_under_steady_small_arrivals() -> Scenario {
+    let mut scenario = Scenario::new(
+        "a large job gets in while small ones keep arriving",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission A5")
+    .arrive(
+        ms(100),
+        Job::new("big", Class::Light).reserves(1_000, 8_000),
+    );
+    for i in 0..12_u64 {
+        let label = format!("s{i}");
+        scenario = scenario.arrive(
+            ms(500 * i),
+            Job::new(&label, Class::Light)
+                .reserves(250, 4_000)
+                .runs_for(secs(2)),
+        );
+    }
+    scenario.expect(Expect::admitted_by("big", secs(7)))
+}
+
+/// `h` (heavy, reserving 2048 MB, using 1000) and `l` (light, reserving 1000 MB, using 1100) run. At 3 s, outside
+/// load takes 14500 MB, so available memory is 16384 - 14500 - 2100, below zero and below `kill_floor` (512).
+/// The victim is "the candidate furthest over its reservation on that resource": `l`, by 100 MB; `h` is under.
+/// Once `l` is gone, 16384 - 14500 - 1000 = 884 MB is available, over the floor, so the breach costs one job.
+fn memory_breach_kills_the_job_furthest_over_and_only_one() -> Scenario {
+    Scenario::new(
+        "a memory breach kills the job furthest over its reservation, and only one",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission B7")
+    .load(Sample::at(ms(0)))
+    .load(Sample::at(secs(3)).background(0, 14_500))
+    .arrive(
+        ms(0),
+        Job::new("h", Class::Heavy)
+            .reserves(2_000, 2_048)
+            .uses(100, 1_000)
+            .runs_for(secs(10)),
+    )
+    .arrive(
+        ms(1_000),
+        Job::new("l", Class::Light)
+            .reserves(500, 1_000)
+            .uses(100, 1_100)
+            .runs_for(secs(10)),
+    )
+    .expect(Expect::killed("l", Trigger::Memory))
+    .expect(Expect::not_killed("h"))
+    .expect(Expect::at_most_kills(Trigger::Memory, 1))
+}
+
+/// `o` runs for a long time and its supervisor is killed, leaving a running orphan whose holder is alive. `q`, a
+/// quiet job, becomes due after `quiet_max_wait` (5 s) and the machine drains for it. A quiet job is allowed when
+/// "no living ticket [is] charged", and an orphan isn't living, so `q` gets in while `o` still runs, rather than
+/// waiting for the orphan to end.
+fn due_quiet_job_isnt_held_off_by_an_orphan() -> Scenario {
+    Scenario::new(
+        "a due quiet job isn't held off by an orphan that never ends",
+        MachineConfig::for_tests(),
+    )
+    .checks("r3-admission A16")
+    .arrive(
+        ms(0),
+        Job::new("o", Class::Light).uses(500, 64).runs_for(secs(60)),
+    )
+    .fault(
+        ms(500),
+        Fault::signal("o", Process::Supervisor, Signal::Kill),
+    )
+    .arrive(ms(1_000), Job::new("q", Class::Quiet))
+    .expect(Expect::admitted_by("q", secs(8)))
+}
+
+/// `x` holds 15000 MB, so `w1` and `w2` (8000 MB each) wait behind it, in that order. The machine sleeps from
+/// 1.5 s to 9.5 s, longer than the stall limit (1 s), and `x` ends 0.5 s after waking. On waking, every waiter's
+/// last pass is 8 s old, but "nobody is judged stalled ... until the stall limit has passed since the machine
+/// last woke", so whichever supervisor runs its first pass after waking, `w1` still starts before `w2`.
+fn nobody_jumps_the_queue_after_the_machine_wakes() -> Scenario {
+    Scenario::new(
+        "after the machine wakes, no waiter is skipped as stalled",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-concurrency B7")
+    .checks("r3-admission A14")
+    .arrive(
+        ms(0),
+        Job::new("x", Class::Light)
+            .reserves(1_000, 15_000)
+            .runs_for(secs(2)),
+    )
+    .arrive(ms(500), Job::new("w1", Class::Light).reserves(1_000, 8_000))
+    .arrive(
+        ms(1_000),
+        Job::new("w2", Class::Light).reserves(1_000, 8_000),
+    )
+    .sleep(ms(1_500), ms(9_500))
+    .expect(Expect::admitted_before("w1", "w2"))
+}
+
+/// `h1` and `h2` (heavy) run for 12 s, so `h3` waits on `max_running.heavy` past `aging` and `aging_hold` (its hold
+/// would lapse at 6.6 s). A lapsed hold drains the machine only if `allowed(t, ...) and fits_once_drained(t)`
+/// (ARCHITECTURE rev 111), and `h3` isn't allowed, so it doesn't stop the walk, and `l`, arriving after the lapse,
+/// starts at once.
+fn class_blocked_ticket_doesnt_drain_when_its_hold_lapses() -> Scenario {
+    let heavy = |label| {
+        Job::new(label, Class::Heavy)
+            .reserves(2_000, 1_024)
+            .runs_for(secs(12))
+    };
+    Scenario::new(
+        "a ticket its class keeps out doesn't drain the machine when its hold lapses",
+        MachineConfig::for_tests(),
+    )
+    .checks("r2-admission B6")
+    .arrive(ms(0), heavy("h1"))
+    .arrive(ms(300), heavy("h2"))
+    .arrive(ms(600), heavy("h3"))
+    .arrive(ms(7_000), Job::new("l", Class::Light))
+    .expect(Expect::admitted_by("l", ms(8_000)))
+    .expect(Expect::admitted_before("l", "h3"))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

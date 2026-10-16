@@ -17,6 +17,10 @@ pub enum Event {
     Arrive(Job),
     /// Something outside maitred acts on a job.
     Fault(Fault),
+    /// The whole machine sleeps until `wakes_at`. Nothing runs while it sleeps, and a job's `runs_for` counts
+    /// only time awake. On waking, maitred's processes resume in an order the seed chooses, and the first sample
+    /// after waking carries `woke_at`.
+    Sleep { wakes_at: Ms },
 }
 
 /// A reason a scenario can't be run as written.
@@ -30,6 +34,8 @@ pub enum Invalid {
     BeforeArrival { label: String, at: Ms },
     /// A job asks for a slot from a pool the machine config doesn't declare.
     UndeclaredPool { label: String, pool: String },
+    /// A sleep wakes no later than it starts.
+    SleepEndsBeforeItStarts { at: Ms, wakes_at: Ms },
     /// A strict order is expected between two jobs that arrive less than a poll interval apart, which
     /// real processes can't promise.
     OrderTooClose {
@@ -96,6 +102,12 @@ impl Scenario {
         self.at(at, Event::Arrive(job))
     }
 
+    /// The machine sleeps from `at` until `wakes_at`.
+    #[must_use]
+    pub fn sleep(self, at: Ms, wakes_at: Ms) -> Self {
+        self.at(at, Event::Sleep { wakes_at })
+    }
+
     /// `fault` happens at `at`.
     #[must_use]
     pub fn fault(self, at: Ms, fault: Fault) -> Self {
@@ -118,7 +130,7 @@ impl Scenario {
     pub fn arrivals(&self) -> impl Iterator<Item = (Ms, &Job)> {
         self.events.iter().filter_map(|(at, event)| match event {
             Event::Arrive(job) => Some((*at, job)),
-            Event::Fault(_) => None,
+            Event::Fault(_) | Event::Sleep { .. } => None,
         })
     }
 
@@ -150,6 +162,14 @@ impl Scenario {
             }
         }
         for (at, event) in &self.events {
+            if let Event::Sleep { wakes_at } = event
+                && wakes_at <= at
+            {
+                problems.push(Invalid::SleepEndsBeforeItStarts {
+                    at: *at,
+                    wakes_at: *wakes_at,
+                });
+            }
             if let Event::Fault(fault) = event {
                 match self.arrival_of(fault.label()) {
                     None => problems.push(Invalid::UnknownLabel(fault.label().into())),

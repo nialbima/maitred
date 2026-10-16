@@ -138,3 +138,27 @@ fn every_problem_is_reported_not_just_the_first() {
         ])
     );
 }
+
+#[test]
+fn a_machine_sleep_that_ends_after_it_starts_is_accepted() {
+    let scenario = Scenario::new("a night's sleep", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .sleep(ms(1_000), ms(9_000));
+
+    assert_eq!(scenario.validate(), Ok(()));
+}
+
+#[test]
+fn a_machine_sleep_that_ends_before_it_starts_is_refused() {
+    let scenario = Scenario::new("a sleep backwards", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .sleep(ms(9_000), ms(1_000));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::SleepEndsBeforeItStarts {
+            at: ms(9_000),
+            wakes_at: ms(1_000)
+        }])
+    );
+}
