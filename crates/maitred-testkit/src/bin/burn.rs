@@ -25,6 +25,10 @@
 //! spinners run. It lists `pid`, `orphan`, `daemon`, `children` and `resident_mb` in the report's format, so a test
 //! or the runner signals or measures `burn` only once it is ready.
 //!
+//! The report's memory figure to compare with a holder's: `peak_footprint_mb` on macOS (it counts compressed
+//! memory, which macOS's accounting does and `ru_maxrss` doesn't), `peak_resident_mb` elsewhere. Resident memory on
+//! macOS can drop under machine pressure even though the memory is still the job's.
+//!
 //! Exits 64 on an argument it doesn't know or `--print-every-ms 0`, and 71 if `setsid` or `setpgid` fails.
 
 use std::fmt::Write as _;

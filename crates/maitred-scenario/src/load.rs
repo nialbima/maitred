@@ -247,8 +247,8 @@ impl Publisher {
             // macOS: maitred's own running threads per core, counted only while CPU use is known and at capacity.
             cpu_read
                 && demand >= self.capacity.cpu_millicores
-                && u64::from(measured_threads_milli)
-                    > u64::from(self.cpu_kill_ceiling) * capacity / 1_000
+                && u64::from(measured_threads_milli) * 1_000
+                    > u64::from(self.cpu_kill_ceiling) * capacity
         } else {
             pressure_read && per_core_over(demand, self.cpu_kill_ceiling)
         };

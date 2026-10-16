@@ -181,6 +181,7 @@ fn aged_ticket_kept_out_by_its_class_holds_nothing() -> Scenario {
     .arrive(ms(600), heavy("h3"))
     .arrive(ms(4_000), Job::new("l", Class::Light).reserves(3_000, 512))
     .expect(Expect::admitted_by("l", ms(5_000)))
+    .run_until(secs(10))
 }
 
 /// A quiet job starts on the idle machine (two quiet samples), and its supervisor is then killed, leaving a
@@ -200,6 +201,7 @@ fn orphaned_quiet_job_doesnt_stop_the_queue() -> Scenario {
     .arrive(ms(1_500), Job::new("l", Class::Light))
     .expect(Expect::admitted_before("q", "l"))
     .expect(Expect::admitted_by("l", ms(2_500)))
+    .run_until(secs(5))
 }
 
 /// Outside load demands 4000 millicores, half a runnable task per core, over the quiet threshold, so the quiet
@@ -218,6 +220,7 @@ fn quiet_job_waits_for_a_quiet_machine_without_holding_up_others() -> Scenario {
     .expect(Expect::admitted_by("l", ms(1_500)))
     .expect(Expect::not_admitted_before("q", secs(5)))
     .expect(Expect::admitted("q"))
+    .run_until(secs(10))
 }
 
 /// Small light jobs, each reserving 4000 MB and using 64, arrive every 500 ms from 0 to 11.5 s and run for 2 s,
@@ -308,6 +311,7 @@ fn due_quiet_job_isnt_held_off_by_an_orphan() -> Scenario {
     .expect(Expect::admitted_by("q", secs(7)))
     .expect(Expect::admitted_before("q", "l"))
     .expect(Expect::admitted_by("l", secs(9)))
+    .run_until(secs(12))
 }
 
 /// Outside load holds 8000 MB, so only 8384 is free and neither `w1` nor `w2` (9000 MB each) fits; first-in never
@@ -368,6 +372,7 @@ fn class_blocked_ticket_doesnt_drain_when_its_hold_lapses() -> Scenario {
     .arrive(ms(7_000), Job::new("l", Class::Light))
     .expect(Expect::admitted_by("l", ms(8_000)))
     .expect(Expect::admitted_before("l", "h3"))
+    .run_until(secs(14))
 }
 
 /// The sampler never reads memory, so admission is the plain-lock fallback: one job at a time, "admit me only if
@@ -421,6 +426,7 @@ fn with_no_reliable_load_a_quiet_job_not_yet_due_neither_starts_nor_holds_the_li
     .arrive(ms(5_000), Job::new("l", Class::Light))
     .expect(Expect::admitted_by("l", secs(6)))
     .expect(Expect::not_admitted_before("q", secs(9)))
+    .run_until(secs(12))
 }
 
 /// Nick's decision on MT-024: the sampler is down from the start, so there is never a load file. `q` (quiet) isn't

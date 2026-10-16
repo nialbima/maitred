@@ -7,9 +7,21 @@ use maitred_testkit::regressions::{phase1_admission, phase1_classification};
 
 #[test]
 fn every_phase_1_scenario_is_valid() {
-    for scenario in phase1_admission() {
-        assert_eq!(scenario.validate(), Ok(()), "{}", scenario.name);
-    }
+    let invalid: Vec<String> = phase1_admission()
+        .iter()
+        .filter_map(|scenario| {
+            scenario
+                .validate()
+                .err()
+                .map(|problems| format!("{}: {problems:?}", scenario.name))
+        })
+        .collect();
+
+    assert!(
+        invalid.is_empty(),
+        "invalid scenarios:\n{}",
+        invalid.join("\n")
+    );
 }
 
 #[test]

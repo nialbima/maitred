@@ -319,3 +319,87 @@ fn a_run_that_stops_before_a_time_an_expectation_names_is_refused() {
         }])
     );
 }
+
+fn two_jobs(name: &str) -> Scenario {
+    Scenario::new(name, machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(2_000), Job::new("b", Class::Light))
+        .run_until(secs(60))
+}
+
+#[test]
+fn an_admitted_by_earlier_than_a_not_admitted_before_on_one_job_is_refused() {
+    let scenario = two_jobs("windows that miss")
+        .expect(Expect::admitted_by("a", secs(1)))
+        .expect(Expect::not_admitted_before("a", secs(2)));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn never_admitted_with_anything_that_needs_the_job_admitted_is_refused() {
+    let first_of_a_pair = two_jobs("never, yet first")
+        .expect(Expect::never_admitted("a"))
+        .expect(Expect::admitted_before("a", "b"));
+    let killed = two_jobs("never, yet killed")
+        .expect(Expect::never_admitted("a"))
+        .expect(Expect::killed("a", maitred_scenario::Trigger::Memory));
+
+    assert_eq!(
+        first_of_a_pair.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+    assert_eq!(
+        killed.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn a_kill_and_at_most_no_kills_for_its_trigger_are_refused() {
+    let scenario = two_jobs("killed, yet no kills")
+        .expect(Expect::killed("a", maitred_scenario::Trigger::Memory))
+        .expect(Expect::at_most_kills(maitred_scenario::Trigger::Memory, 0));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn an_order_its_jobs_windows_make_impossible_is_refused() {
+    let scenario = two_jobs("a must come first, but can't")
+        .expect(Expect::admitted_before("a", "b"))
+        .expect(Expect::not_admitted_before("a", secs(5)))
+        .expect(Expect::admitted_by("b", secs(3)));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::Contradicts("a".into())])
+    );
+}
+
+#[test]
+fn a_time_named_past_the_last_event_needs_an_end() {
+    let scenario = Scenario::new("a window past every event", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .expect(Expect::not_admitted_before("a", secs(60)));
+
+    assert_eq!(scenario.validate(), Err(vec![Invalid::NeedsAnEnd]));
+}
+
+#[test]
+fn never_together_with_a_job_never_admitted_is_refused_as_unable_to_fail() {
+    let scenario = two_jobs("together with nothing")
+        .expect(Expect::never_admitted("a"))
+        .expect(Expect::never_together("a", "b"));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::NeverFails("a".into())])
+    );
+}

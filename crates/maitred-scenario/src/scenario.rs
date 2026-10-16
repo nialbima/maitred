@@ -41,8 +41,11 @@ pub enum Invalid {
     CantFail { allowed: usize, jobs: usize },
     /// Two expectations about one job can't both hold.
     Contradicts(String),
-    /// An expectation that a job never starts needs `run_until`, since that job never ends.
+    /// A job expected never to start, or a time named past the last event, needs `run_until`: otherwise the run may
+    /// end before the expectation can be judged.
     NeedsAnEnd,
+    /// An expectation can never fail, given the others (for example `never_together` with a job never admitted).
+    NeverFails(String),
     /// The run stops before a time an expectation names, so the expectation can't be judged.
     StopsBeforeExpectation { until: Ms, named: Ms },
     /// The run stops before its last event.
@@ -276,46 +279,99 @@ impl Scenario {
         }
     }
 
-    /// Expectations that can't all hold, or can't be judged within the run.
+    /// Expectations that can't all hold, that can't fail, or that can't be judged within the run.
     fn contradictions(&self) -> Vec<Invalid> {
         let mut problems = Vec::new();
-        let has = |wanted: &Expect| self.expectations.contains(wanted);
+        let named_past_last_event = self
+            .expectations
+            .iter()
+            .filter_map(named_time)
+            .any(|named| self.events.last().is_none_or(|(last, _)| named > *last));
+        if self.until.is_none()
+            && (named_past_last_event
+                || self
+                    .expectations
+                    .iter()
+                    .any(|e| matches!(e, Expect::NeverAdmitted(_))))
+        {
+            problems.push(Invalid::NeedsAnEnd);
+        }
         for expectation in &self.expectations {
             match expectation {
                 Expect::NeverAdmitted(label) => {
-                    let admitted = self.expectations.iter().any(|other| {
-                        matches!(other, Expect::Admitted(l) | Expect::AdmittedBy { label: l, .. } if l == label)
-                    });
-                    if admitted {
+                    if self
+                        .expectations
+                        .iter()
+                        .any(|other| implies_admitted(other, label))
+                    {
                         problems.push(Invalid::Contradicts(label.clone()));
                     }
-                    if self.until.is_none() {
-                        problems.push(Invalid::NeedsAnEnd);
+                    let together = self.expectations.iter().any(|other| {
+                        matches!(other, Expect::NeverTogether { first, second } if first == label || second == label)
+                    });
+                    if together {
+                        problems.push(Invalid::NeverFails(label.clone()));
                     }
                 }
-                Expect::AdmittedBefore { first, second } if first < second => {
-                    if has(&Expect::admitted_before(second, first)) {
+                Expect::AdmittedBefore { first, second } => {
+                    let reversed = first < second
+                        && self
+                            .expectations
+                            .contains(&Expect::admitted_before(second, first));
+                    // `first` can't be admitted before its earliest allowed time, nor `second` after its latest.
+                    let impossible = matches!(
+                        (self.earliest(first), self.latest(second)),
+                        (Some(earliest), Some(latest)) if latest < earliest
+                    );
+                    if reversed || impossible {
                         problems.push(Invalid::Contradicts(first.clone()));
                     }
                 }
-                Expect::Killed { label, .. } if has(&Expect::not_killed(label)) => {
-                    problems.push(Invalid::Contradicts(label.clone()));
-                }
-                Expect::AdmittedBy { by: named, .. }
-                | Expect::NotAdmittedBefore { before: named, .. } => {
-                    if let Some(until) = self.until
-                        && until < *named
-                    {
-                        problems.push(Invalid::StopsBeforeExpectation {
-                            until,
-                            named: *named,
-                        });
+                Expect::Killed { label, trigger } => {
+                    let no_kills = self
+                        .expectations
+                        .iter()
+                        .any(|other| matches!(other, Expect::AtMostKills { trigger: t, allowed: 0 } if t == trigger));
+                    if self.expectations.contains(&Expect::not_killed(label)) || no_kills {
+                        problems.push(Invalid::Contradicts(label.clone()));
                     }
+                }
+                Expect::AdmittedBy { label, by }
+                    if self.earliest(label).is_some_and(|earliest| *by < earliest) =>
+                {
+                    problems.push(Invalid::Contradicts(label.clone()));
                 }
                 _ => {}
             }
+            if let (Some(until), Some(named)) = (self.until, named_time(expectation))
+                && until < named
+            {
+                problems.push(Invalid::StopsBeforeExpectation { until, named });
+            }
         }
         problems
+    }
+
+    /// The latest `not_admitted_before` time on `label`: it can't be admitted earlier.
+    fn earliest(&self, label: &str) -> Option<Ms> {
+        self.expectations
+            .iter()
+            .filter_map(|e| match e {
+                Expect::NotAdmittedBefore { label: l, before } if l == label => Some(*before),
+                _ => None,
+            })
+            .max()
+    }
+
+    /// The earliest `admitted_by` time on `label`: it must be admitted by then.
+    fn latest(&self, label: &str) -> Option<Ms> {
+        self.expectations
+            .iter()
+            .filter_map(|e| match e {
+                Expect::AdmittedBy { label: l, by } if l == label => Some(*by),
+                _ => None,
+            })
+            .min()
     }
 
     /// Every expectation `outcome` breaks.
@@ -335,5 +391,25 @@ impl Scenario {
         } else {
             Err(failures)
         }
+    }
+}
+
+/// The time an expectation names, if it names one.
+fn named_time(expectation: &Expect) -> Option<Ms> {
+    match expectation {
+        Expect::AdmittedBy { by, .. } => Some(*by),
+        Expect::NotAdmittedBefore { before, .. } => Some(*before),
+        _ => None,
+    }
+}
+
+/// Whether `expectation` can only hold if `label` is admitted.
+fn implies_admitted(expectation: &Expect, label: &str) -> bool {
+    match expectation {
+        Expect::Admitted(l)
+        | Expect::AdmittedBy { label: l, .. }
+        | Expect::Killed { label: l, .. } => l == label,
+        Expect::AdmittedBefore { first, .. } => first == label,
+        _ => false,
     }
 }

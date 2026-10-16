@@ -2,6 +2,9 @@
 //!
 //! Every scenario here is written from ARCHITECTURE.md and DESIGN.md, before the code it covers. The numbers
 //! in each are worked from the doc's rules, and the comment beside them says how.
+//!
+//! A runner judges each case or scenario with `judge`. One marked `fails_until("MT-0NN")` is expected to fail: its
+//! failure is reported as known, and its passing is reported as a failure, so a closed gap can't stay marked.
 
 mod phase1;
 

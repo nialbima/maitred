@@ -340,8 +340,10 @@ pub struct ClassCase {
     pub pools: Vec<String>,
     pub input: Input,
     pub expected: Option<Expected>,
-    /// The triage entry tracking why this case fails against the doc as it stands. A runner reports such a case's
-    /// failure as known and its passing as news: the entry may be ready to close.
+    /// The triage entry tracking why this case fails against the doc as it stands. Every runner must report such a
+    /// case's failure as known, not as a failure, and must report its passing as a failure of its own: the gap is
+    /// closed, so the entry may be ready to close and the marker must come off. A marked case that passes silently
+    /// would hide a fixed gap behind a stale label.
     pub known_gap: Option<String>,
 }
 
