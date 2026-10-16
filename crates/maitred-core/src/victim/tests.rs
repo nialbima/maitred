@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    BootTime, ClassMinimums, Config, Liveness, Load, Resources, Snapshot, State, Ticket, TicketId,
+    BootTime, ClassMinimums, Config, CpuLoad, Liveness, Load, Resources, Snapshot, State, Ticket,
+    TicketId,
 };
 
 const NOW: BootTime = BootTime(1_000_000_000);
@@ -22,7 +23,8 @@ fn config() -> Config {
         mem_floor_mb: 1_000,
         kill_floor_mb: 500,
         mem_critical_mb: 200,
-        cpu_ceiling: 1.5,
+        cpu_stall_ceiling: 0.3,
+        cpu_runnable_ceiling: 1.5,
         gpu_ceiling: 0.9,
         cpu_kill_samples: 3,
         gpu_kill_samples: 3,
@@ -41,7 +43,7 @@ fn load() -> Load {
         woke_at: None,
         capacity: Resources::new(8_000, 16_000),
         cpu_used_millicores: Some(0),
-        cpu_pressure: Some(0.0),
+        cpu_load: Some(CpuLoad::Stall(0.0)),
         mem_available_mb: Some(16_000),
         gpu_utilization: None,
         quiet_streak: 0,
@@ -552,10 +554,10 @@ fn a_job_measured_exactly_at_its_reservation_does_not_go_before_the_recency_orde
 }
 
 #[test]
-fn a_missing_cpu_pressure_reading_leaves_the_memory_kill_on() {
+fn a_missing_cpu_load_reading_leaves_the_memory_kill_on() {
     let mut snap = snapshot(vec![]);
     short_of_memory(&mut snap);
-    snap.load.as_mut().unwrap().cpu_pressure = None;
+    snap.load.as_mut().unwrap().cpu_load = None;
 
     assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: false }));
 }

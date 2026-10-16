@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    BootTime, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources,
-    Snapshot, State, Ticket, TicketId,
+    BootTime, ClassMinimums, Config, CpuLoad, Liveness, Load, Pool, PoolConfig, Position,
+    Resources, Snapshot, State, Ticket, TicketId,
 };
 
 const NOW: BootTime = BootTime(1_000_000_000);
@@ -25,7 +25,8 @@ fn config() -> Config {
         mem_floor_mb: 1_000,
         kill_floor_mb: 500,
         mem_critical_mb: 200,
-        cpu_ceiling: 1.5,
+        cpu_stall_ceiling: 0.3,
+        cpu_runnable_ceiling: 1.5,
         gpu_ceiling: 0.9,
         cpu_kill_samples: 3,
         gpu_kill_samples: 3,
@@ -44,7 +45,7 @@ fn load() -> Load {
         woke_at: None,
         capacity: Resources::new(8_000, 16_000),
         cpu_used_millicores: Some(0),
-        cpu_pressure: Some(0.0),
+        cpu_load: Some(CpuLoad::Stall(0.0)),
         mem_available_mb: Some(16_000),
         gpu_utilization: None,
         quiet_streak: 0,
@@ -269,14 +270,14 @@ fn a_missing_cpu_reading_is_no_reliable_load() {
 }
 
 #[test]
-fn a_missing_cpu_pressure_reading_only_turns_off_the_cpu_limit() {
-    // ARCHITECTURE, Critical readings: CPU pressure isn't critical; a missing figure means no CPU
-    // limit, not one job at a time.
+fn a_missing_cpu_load_reading_only_turns_off_the_cpu_limit() {
+    // ARCHITECTURE, Critical readings: the CPU figures aren't critical; a missing figure means no
+    // CPU limit, not one job at a time.
     let mut snap = snapshot(vec![
         ticket("running", 1, Class::Light, State::Running),
         ticket("me", 2, Class::Light, State::Waiting),
     ]);
-    snap.load.as_mut().unwrap().cpu_pressure = None;
+    snap.load.as_mut().unwrap().cpu_load = None;
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
@@ -313,15 +314,49 @@ fn memory_exactly_at_the_floor_is_not_below_it() {
     assert_eq!(decide(&snap, &me()), admitted());
 }
 
+// MT-033 (Nick, 2026-10-16): stall time and runnable work per core are two figures, each with its
+// own ceiling: 0.3 for stall, 1.5 for runnable per core here.
+
 #[test]
-fn cpu_pressure_above_the_ceiling_holds_everyone() {
+fn stall_above_its_ceiling_holds_everyone() {
     let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
-    snap.load.as_mut().unwrap().cpu_pressure = Some(1.51);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::Stall(0.31));
 
     assert_eq!(
         decide(&snap, &me()),
         Decision::Wait(Reason::LiveLimit(Limit::Cpu))
     );
+}
+
+#[test]
+fn runnable_work_above_its_ceiling_holds_everyone() {
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::RunnablePerCore(1.51));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::LiveLimit(Limit::Cpu))
+    );
+}
+
+#[test]
+fn stall_is_judged_by_its_own_ceiling_not_the_runnable_one() {
+    // Under the runnable ceiling, but most of the interval had work waiting.
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::Stall(0.9));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::LiveLimit(Limit::Cpu))
+    );
+}
+
+#[test]
+fn runnable_work_is_judged_by_its_own_ceiling_not_the_stall_one() {
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::RunnablePerCore(0.9));
+
+    assert_eq!(decide(&snap, &me()), admitted());
 }
 
 #[test]
@@ -1087,9 +1122,17 @@ fn a_recreation_exactly_at_the_stall_limit_no_longer_holds_admission() {
 }
 
 #[test]
-fn cpu_pressure_exactly_at_the_ceiling_is_not_over_it() {
+fn stall_exactly_at_its_ceiling_is_not_over_it() {
     let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
-    snap.load.as_mut().unwrap().cpu_pressure = Some(1.5);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::Stall(0.3));
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn runnable_work_exactly_at_its_ceiling_is_not_over_it() {
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
+    snap.load.as_mut().unwrap().cpu_load = Some(CpuLoad::RunnablePerCore(1.5));
 
     assert_eq!(decide(&snap, &me()), admitted());
 }

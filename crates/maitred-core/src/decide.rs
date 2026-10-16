@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::snapshot::Reliable;
 use crate::{
-    BootTime, Class, Config, Liveness, Pool, PoolConfig, Position, Resources, Snapshot, State,
-    Ticket, TicketId,
+    BootTime, Class, Config, CpuLoad, Liveness, Pool, PoolConfig, Position, Resources, Snapshot,
+    State, Ticket, TicketId,
 };
 
 #[cfg(test)]
@@ -102,10 +102,11 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
     if load.mem_available_mb < config.mem_floor_mb {
         return Decision::Wait(Reason::LiveLimit(Limit::Memory));
     }
-    if load
-        .cpu_pressure
-        .is_some_and(|pressure| pressure > config.cpu_ceiling)
-    {
+    // Each figure against its own ceiling (MT-033).
+    if load.cpu_load.is_some_and(|cpu| match cpu {
+        CpuLoad::Stall(stall) => stall > config.cpu_stall_ceiling,
+        CpuLoad::RunnablePerCore(runnable) => runnable > config.cpu_runnable_ceiling,
+    }) {
         return Decision::Wait(Reason::LiveLimit(Limit::Cpu));
     }
     if load

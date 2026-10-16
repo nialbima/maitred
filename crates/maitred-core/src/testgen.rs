@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use crate::{
-    BootTime, Class, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources,
-    Snapshot, State, Ticket, TicketId,
+    BootTime, Class, ClassMinimums, Config, CpuLoad, Liveness, Load, Pool, PoolConfig, Position,
+    Resources, Snapshot, State, Ticket, TicketId,
 };
 
 pub(crate) const NOW: BootTime = BootTime(1_000_000_000);
@@ -120,8 +120,14 @@ fn load() -> impl Strategy<Value = Option<Load>> {
             (
                 // Outside CPU use up to a quarter of the machine, so budgets often fit.
                 proptest::option::weighted(0.98, 0..2_000u64),
-                // Pressure past the 1.5 ceiling in about 6% of samples.
-                proptest::option::weighted(0.98, 0.0..1.6f64),
+                // Either figure, each past its own ceiling (0.3, 1.5) in a few percent of samples.
+                proptest::option::weighted(
+                    0.98,
+                    prop_oneof![
+                        (0.0..0.32f64).prop_map(CpuLoad::Stall),
+                        (0.0..1.6f64).prop_map(CpuLoad::RunnablePerCore),
+                    ],
+                ),
             ),
             // GPU absent in half; under the 0.9 ceiling almost always when present.
             (mem_available(), proptest::option::of(0.0..0.95f64)),
@@ -157,7 +163,7 @@ fn load() -> impl Strategy<Value = Option<Load>> {
                     woke_at: woke.map(|ago| BootTime(NOW.0 - ago)),
                     capacity: Resources::new(8_000, 16_000),
                     cpu_used_millicores: cpu_used,
-                    cpu_pressure: pressure,
+                    cpu_load: pressure,
                     mem_available_mb: mem,
                     gpu_utilization: gpu,
                     quiet_streak,
@@ -213,7 +219,8 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                         mem_floor_mb: 1_000,
                         kill_floor_mb: 500,
                         mem_critical_mb: 200,
-                        cpu_ceiling: 1.5,
+                        cpu_stall_ceiling: 0.3,
+                        cpu_runnable_ceiling: 1.5,
                         gpu_ceiling: 0.9,
                         cpu_kill_samples: 3,
                         gpu_kill_samples: 3,

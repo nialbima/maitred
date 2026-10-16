@@ -25,11 +25,13 @@ pub struct Config {
     pub kill_floor_mb: u64,
     /// Free memory below this lets the kill policy choose a quiet job.
     pub mem_critical_mb: u64,
-    /// Runnable work per core, over the last sample interval.
-    pub cpu_ceiling: f64,
+    /// The CPU live limit when the platform measures stall time (`CpuLoad::Stall`), 0 to 1.
+    pub cpu_stall_ceiling: f64,
+    /// The CPU live limit when the platform measures runnable work per core instead.
+    pub cpu_runnable_ceiling: f64,
     /// GPU utilisation, 0 to 1.
     pub gpu_ceiling: f64,
-    /// How many consecutive samples over `cpu_kill_ceiling` trigger a kill; twice as many lets the
+    /// How many consecutive samples over the CPU kill ceiling trigger a kill; twice as many lets the
     /// kill policy choose a quiet job.
     pub cpu_kill_samples: u32,
     /// How many consecutive samples over `gpu_kill_ceiling` trigger a kill.
@@ -144,7 +146,8 @@ mod tests {
             mem_floor_mb: 1_000,
             kill_floor_mb: 500,
             mem_critical_mb: 200,
-            cpu_ceiling: 1.5,
+            cpu_stall_ceiling: 0.3,
+            cpu_runnable_ceiling: 1.5,
             gpu_ceiling: 0.9,
             cpu_kill_samples: 3,
             gpu_kill_samples: 3,

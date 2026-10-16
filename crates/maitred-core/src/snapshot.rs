@@ -73,7 +73,7 @@ impl Snapshot {
         Some(Reliable {
             capacity: load.capacity,
             cpu_used_millicores: load.cpu_used_millicores?,
-            cpu_pressure: load.cpu_pressure,
+            cpu_load: load.cpu_load,
             mem_available_mb: load.mem_available_mb?,
             gpu_utilization: load.gpu_utilization,
             quiet_streak: load.quiet_streak,
@@ -88,12 +88,23 @@ pub(crate) struct Reliable {
     pub(crate) capacity: Resources,
     pub(crate) cpu_used_millicores: u64,
     /// Not a critical reading: missing, it turns off only the CPU live limit.
-    pub(crate) cpu_pressure: Option<f64>,
+    pub(crate) cpu_load: Option<CpuLoad>,
     pub(crate) mem_available_mb: u64,
     pub(crate) gpu_utilization: Option<f64>,
     pub(crate) quiet_streak: u32,
     pub(crate) over_cpu_streak: u32,
     pub(crate) over_gpu_streak: u32,
+}
+
+/// The CPU figure this platform's live limit reads (MT-033). They answer different questions, how
+/// much work is being delayed and how much is queued, and no formula maps one onto the other, so
+/// each has its own ceiling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CpuLoad {
+    /// Linux and cgroups: the fraction of the interval in which some task waited for a CPU, 0 to 1.
+    Stall(f64),
+    /// macOS: the 1-minute load average per core.
+    RunnablePerCore(f64),
 }
 
 /// The sampler's latest sample, as `load/now.json` holds it.
@@ -106,7 +117,8 @@ pub struct Load {
     pub capacity: Resources,
     /// `None` when the reading is missing.
     pub cpu_used_millicores: Option<u64>,
-    pub cpu_pressure: Option<f64>,
+    /// `None` when the platform's own figure is missing: no CPU limit, and never the other figure.
+    pub cpu_load: Option<CpuLoad>,
     pub mem_available_mb: Option<u64>,
     /// GPU utilisation, 0 to 1; `None` on a machine with no readable GPU.
     pub gpu_utilization: Option<f64>,

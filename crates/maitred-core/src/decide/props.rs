@@ -48,7 +48,10 @@ proptest! {
     fn nothing_starts_past_the_live_limits(snap in snapshot()) {
         let Some(load) = snap.load.as_ref() else { return Ok(()) };
         let over = load.mem_available_mb.is_some_and(|m| m < snap.config.mem_floor_mb)
-            || load.cpu_pressure.is_some_and(|p| p > snap.config.cpu_ceiling)
+            || load.cpu_load.is_some_and(|cpu| match cpu {
+                CpuLoad::Stall(s) => s > snap.config.cpu_stall_ceiling,
+                CpuLoad::RunnablePerCore(r) => r > snap.config.cpu_runnable_ceiling,
+            })
             || load.gpu_utilization.is_some_and(|g| g > snap.config.gpu_ceiling);
         for (_, how) in admissions(&snap) {
             // Only the fallback, which has no reliable load to judge by, may admit past one.
