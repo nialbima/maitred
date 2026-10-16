@@ -37,8 +37,11 @@ pub enum Violation {
 pub struct Checker {
     tickets: PathBuf,
     records: Vec<PathBuf>,
-    /// Each ticket present at the last look, with the newest generation read from it.
-    present: BTreeMap<String, Option<u64>>,
+    /// Each ticket present at the last look.
+    present: BTreeSet<String>,
+    /// The newest generation ever read from each ticket. Kept across a deletion: a recreated ticket's generation
+    /// carries on from the last its supervisor wrote (ARCHITECTURE.md, "Still mine?").
+    newest: BTreeMap<String, u64>,
     /// Every ticket ever seen.
     ever: BTreeSet<String>,
 }
@@ -53,7 +56,8 @@ impl Checker {
                 .iter()
                 .map(|project| project.join(".maitred/records"))
                 .collect(),
-            present: BTreeMap::new(),
+            present: BTreeSet::new(),
+            newest: BTreeMap::new(),
             ever: BTreeSet::new(),
         }
     }
@@ -69,7 +73,7 @@ impl Checker {
         }
         let gone: Vec<String> = self
             .present
-            .keys()
+            .iter()
             .filter(|id| !ids.contains(*id))
             .cloned()
             .collect();
@@ -123,19 +127,17 @@ impl Checker {
                 Read::Unknown => None,
             });
         self.ever.insert(id.into());
-        let previous = self.present.insert(id.into(), generation).flatten();
-        match (previous, generation) {
-            (Some(from), Some(to)) if to < from => {
+        self.present.insert(id.into());
+        // An unreadable read says nothing about the generation; the newest good one stays for the next read.
+        let Some(to) = generation else { return vec![] };
+        match self.newest.insert(id.into(), to) {
+            Some(from) if to < from => {
+                self.newest.insert(id.into(), from);
                 vec![Violation::GenerationWentBack {
                     id: id.into(),
                     from,
                     to,
                 }]
-            }
-            (Some(from), None) => {
-                // An unreadable read keeps the last good generation, so a later read is compared with it.
-                self.present.insert(id.into(), Some(from));
-                vec![]
             }
             _ => vec![],
         }

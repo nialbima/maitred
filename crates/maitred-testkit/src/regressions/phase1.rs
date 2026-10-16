@@ -27,6 +27,9 @@ pub fn admission() -> Vec<Scenario> {
         nobody_jumps_the_queue_after_the_machine_wakes(),
         class_blocked_ticket_doesnt_drain_when_its_hold_lapses(),
         unreadable_ticket_doesnt_stop_the_fallback_for_good(),
+        unreadable_ticket_doesnt_block_a_quiet_jobs_idle_check(),
+        first_in_admits_beside_an_unreadable_ticket(),
+        no_drain_counts_on_freeing_an_unreadable_ticket(),
         with_no_reliable_load_a_quiet_job_not_yet_due_neither_starts_nor_holds_the_line(),
         with_the_sampler_down_a_due_quiet_job_gets_in_tainted(),
     ]
@@ -376,17 +379,19 @@ fn class_blocked_ticket_doesnt_drain_when_its_hold_lapses() -> Scenario {
 }
 
 /// The sampler never reads memory, so admission is the plain-lock fallback: one job at a time, "admit me only if
-/// no living ticket is charged and I am first in waiting". `b` and `c` wait behind `a`, which ends at about 1.2 s.
-/// `b`'s ticket is corrupted at 1.1 s, and `b`'s supervisor is stopped from 1.1 s to 1.8 s (inside the 1 s stall
-/// limit), so its ticket stays unreadable while `a` ends and `c` runs its passes. A locked ticket with no readable
-/// slot is charged at the heavy minimum, so `c`'s fallback sees a living charged ticket and waits: `c` can't jump
-/// `b`. Not charging it would let `c` in first. When `b` runs again it rewrites its ticket and gets in, then `c`.
+/// no living ticket is charged and I am first in waiting". `b` and `c` wait behind `a`, which ends by about 1.25 s.
+/// `b`'s ticket is corrupted at 1.1 s and its supervisor stopped until 2 s (inside the 1 s stall limit), so nothing
+/// rewrites it meanwhile. Under Nick's decision on MT-029 (ARCHITECTURE rev 145), an unreadable ticket is charged
+/// "budget only, like an orphan": it isn't a living charged ticket and isn't in `waiting`, so `c`'s fallback admits
+/// `c` by 1.9 s. Letting the unreadable ticket hold up the fallback would keep `c` out until `b` is readable at 2 s.
+/// `b` then waits for `c`, one at a time.
 fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
     Scenario::new(
         "with no reliable load, an unreadable ticket doesn't stop the queue for good",
         MachineConfig::for_tests(),
     )
     .checks("r3-admission A19")
+    .checks("MT-029")
     .load(Sample::at(ms(0)).missing(Reading::Memory))
     .arrive(ms(0), Job::new("a", Class::Light).runs_for(secs(1)))
     .arrive(ms(300), Job::new("b", Class::Light))
@@ -397,14 +402,98 @@ fn unreadable_ticket_doesnt_stop_the_fallback_for_good() -> Scenario {
         Fault::signal("b", Process::Supervisor, Signal::Stop),
     )
     .fault(
-        ms(1_800),
+        ms(2_000),
         Fault::signal("b", Process::Supervisor, Signal::Cont),
     )
+    .expect(Expect::admitted_by("c", ms(1_900)))
     .expect(Expect::admitted("b"))
-    .expect(Expect::admitted("c"))
-    .expect(Expect::admitted_before("b", "c"))
-    .expect(Expect::never_together("a", "b"))
+    .expect(Expect::never_together("a", "c"))
     .expect(Expect::never_together("b", "c"))
+    .run_until(secs(6))
+}
+
+/// `x` runs, using 100 millicores, so the machine stays quiet; its ticket is corrupted at 500 ms and its supervisor
+/// stopped until 1.4 s, so the ticket stays unreadable. Under MT-029 an unreadable ticket "blocks neither first-in nor
+/// a quiet job's idle check", so `q` (quiet), arriving at 600 ms, gets in on the quiet streak within a few passes.
+/// Counting `x` as a living charged ticket would keep `q` out until `x` ends at 5 s.
+fn unreadable_ticket_doesnt_block_a_quiet_jobs_idle_check() -> Scenario {
+    Scenario::new(
+        "an unreadable running ticket doesn't keep a quiet job out",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-029")
+    .arrive(ms(0), Job::new("x", Class::Light).runs_for(secs(5)))
+    .fault(ms(500), Fault::corrupt_ticket("x"))
+    .fault(
+        ms(500),
+        Fault::signal("x", Process::Supervisor, Signal::Stop),
+    )
+    .fault(
+        ms(1_400),
+        Fault::signal("x", Process::Supervisor, Signal::Cont),
+    )
+    .arrive(ms(600), Job::new("q", Class::Quiet))
+    .expect(Expect::admitted_by("q", ms(1_300)))
+    .run_until(secs(6))
+}
+
+/// `x` runs and its ticket is unreadable from 400 ms to 1.3 s, charged the heavy minimum (2000 millicores). `y`
+/// reserves all 8 cores: free CPU is 8000 - 100 used - 1900 still held = 6000, so `y` doesn't fit, and only first-in
+/// can admit it. First-in needs "no living ticket ... charged", and under MT-029 the unreadable ticket doesn't count,
+/// so `y` gets in by 1.2 s. Counting it would keep `y` out until `x` ends at 5 s.
+fn first_in_admits_beside_an_unreadable_ticket() -> Scenario {
+    Scenario::new(
+        "first-in still admits the first job while an unreadable ticket holds a charge",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-029")
+    .arrive(ms(0), Job::new("x", Class::Light).runs_for(secs(5)))
+    .fault(ms(400), Fault::corrupt_ticket("x"))
+    .fault(
+        ms(400),
+        Fault::signal("x", Process::Supervisor, Signal::Stop),
+    )
+    .fault(
+        ms(1_300),
+        Fault::signal("x", Process::Supervisor, Signal::Cont),
+    )
+    .arrive(ms(500), Job::new("y", Class::Light).reserves(8_000, 512))
+    .expect(Expect::admitted_by("y", ms(1_200)))
+    .run_until(secs(6))
+}
+
+/// Outside load holds 2000 MB and `x` runs, using 1000 MB, so 16384 - 2000 - 1000 = 13384 MB is available. `x`'s ticket
+/// is unreadable from 500 ms to 10 s (its supervisor stopped), charged the heavy minimum, 1024 MB. `a` reserves 13500,
+/// so it never fits, and its hold lapses at 6.3 s. It drains the machine only if it "fits once drained": 13384 plus
+/// what living charged tickets hold. Under MT-029 "no drain counts on freeing" an unreadable ticket, so that is
+/// 13384, short of 13500: no drain, and `b`, arriving at 7 s, starts at once. Counting `x`'s 1024 would make it
+/// 14408, and `a` would drain the machine with `b` held behind it.
+fn no_drain_counts_on_freeing_an_unreadable_ticket() -> Scenario {
+    Scenario::new(
+        "a lapsed ticket doesn't drain on the strength of an unreadable ticket's charge",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-029")
+    .load(Sample::at(ms(0)).background(0, 2_000))
+    .arrive(
+        ms(0),
+        Job::new("x", Class::Light)
+            .uses(100, 1_000)
+            .runs_for(secs(20)),
+    )
+    .arrive(ms(300), Job::new("a", Class::Light).reserves(1_000, 13_500))
+    .fault(ms(500), Fault::corrupt_ticket("x"))
+    .fault(
+        ms(500),
+        Fault::signal("x", Process::Supervisor, Signal::Stop),
+    )
+    .arrive(ms(7_000), Job::new("b", Class::Light))
+    .fault(
+        ms(10_000),
+        Fault::signal("x", Process::Supervisor, Signal::Cont),
+    )
+    .expect(Expect::admitted_by("b", ms(8_000)))
+    .run_until(secs(12))
 }
 
 /// Nick's decision on MT-024 (ARCHITECTURE rev 124): with no reliable load, "if I am quiet and not due ...

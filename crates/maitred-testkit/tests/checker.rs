@@ -213,3 +213,25 @@ fn a_ticket_a_fault_deleted_is_excused() {
 
     assert_eq!(checker.observe(|id| id == "t1"), vec![]);
 }
+
+#[test]
+fn a_recreated_ticket_whose_generation_goes_back_is_a_violation() {
+    let (root, project) = roots();
+    let mut checker = Checker::new(&root, &[&project]);
+    let ticket = write_ticket(&root, "t1", 5);
+    checker.observe(|_| false);
+    fs::remove_file(ticket).unwrap();
+    checker.observe(|id| id == "t1");
+
+    // A recreated ticket's generation carries on from the last its supervisor wrote (ARCHITECTURE rev 145).
+    write_ticket(&root, "t1", 3);
+
+    assert_eq!(
+        checker.observe(|_| false),
+        vec![Violation::GenerationWentBack {
+            id: "t1".into(),
+            from: 5,
+            to: 3
+        }]
+    );
+}
