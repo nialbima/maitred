@@ -76,7 +76,6 @@ pub struct MachineConfig {
     pub request_dir_age: Ms,
     pub stale_wait: Ms,
     pub stall_limit: Ms,
-    pub use_freshness: Ms,
     pub load_freshness: Ms,
     pub pools: Vec<Pool>,
 }
@@ -152,7 +151,6 @@ impl MachineConfig {
             request_dir_age: secs(2),
             stale_wait: Ms(sample.0 * 3),
             stall_limit: Ms(poll.0 * 5),
-            use_freshness: Ms(sample.0 * 3),
             load_freshness: Ms(sample.0 * 3),
             pools: Vec::new(),
         }
