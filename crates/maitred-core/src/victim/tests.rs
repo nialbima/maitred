@@ -656,3 +656,38 @@ fn a_named_victim_within_its_reservation_still_stands() {
         Some(id("light"))
     );
 }
+
+// Named-victim stickiness (Nick, 2026-10-16): a name stands only while the named job is still over,
+// or while no candidate is over. Once the overuse has moved to another job, the name moves with it.
+
+#[test]
+fn a_named_victim_back_within_its_reservation_gives_way_to_one_that_is_over() {
+    let a = running("a", Class::Light, 120_000);
+    let b = running("b", Class::Light, 60_000);
+    let mut snap = snapshot(vec![a, b]);
+    let jobs = &mut snap.load.as_mut().unwrap().jobs;
+    jobs.insert(TicketId("a".into()), Resources::new(0, 0));
+    jobs.insert(TicketId("b".into()), Resources::new(0, 3_000));
+    snap.named_victim = Some(id("a"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("b"))
+    );
+}
+
+#[test]
+fn a_named_victim_still_over_stands_even_when_another_is_further_over() {
+    let a = running("a", Class::Light, 60_000);
+    let b = running("b", Class::Light, 120_000);
+    let mut snap = snapshot(vec![a, b]);
+    let jobs = &mut snap.load.as_mut().unwrap().jobs;
+    jobs.insert(TicketId("a".into()), Resources::new(0, 1_500));
+    jobs.insert(TicketId("b".into()), Resources::new(0, 9_000));
+    snap.named_victim = Some(id("a"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("a"))
+    );
+}

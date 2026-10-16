@@ -53,7 +53,7 @@ pub fn trigger(snap: &Snapshot) -> Option<Trigger> {
 /// reservation on that resource, if any is over; otherwise the most recently admitted heavy job,
 /// then light, and quiet only when the trigger is critical. GPU has no per-job figure, so recency
 /// alone, and never a quiet job. A victim named earlier for this breach stands while it is still
-/// eligible. Pure: per-job use comes only from the sample.
+/// over, or while none is over and it is still eligible. Pure: per-job use comes only from the sample.
 #[must_use]
 pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
     if !snap.live_stop_markers.is_empty() || snap.recreated_recently() {
@@ -71,14 +71,17 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
         Trigger::Memory { critical: true } | Trigger::Cpu { critical: true }
     );
 
-    // The victim named earlier for this breach stands while it is still a candidate this rule may
-    // choose (MT-034), so holders reading different samples can't name each other and stand down.
+    // The victim named earlier for this breach stands (MT-034), so holders reading different
+    // samples can't name each other and stand down. It stands only while it is still over, or while
+    // no candidate is over and this rule may still choose it: once the overuse has moved to another
+    // job, the name moves with it.
     if let Some(named) = snap.named_victim.as_ref() {
-        let still = candidates.iter().find(|t| &t.id == named).is_some_and(|t| {
-            t.class != Class::Quiet
-                || critical
-                || dimension.is_some_and(|of| over(snap, t, of).is_some())
-        });
+        let is_over = |t: &Ticket| dimension.is_some_and(|of| over(snap, t, of).is_some());
+        let none_over = !candidates.iter().any(|t| is_over(t));
+        let still = candidates
+            .iter()
+            .find(|t| &t.id == named)
+            .is_some_and(|t| is_over(t) || (none_over && (t.class != Class::Quiet || critical)));
         if still {
             return Some(named.clone());
         }

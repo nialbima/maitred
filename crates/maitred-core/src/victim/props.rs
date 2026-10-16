@@ -92,17 +92,26 @@ proptest! {
         }
     }
 
-    /// A victim named earlier for the breach stands while it is a candidate this rule may choose.
+    /// A victim named earlier for the breach stands while it is a candidate this rule may choose and
+    /// either it is still over or no candidate is; otherwise it isn't chosen over one that is over.
     #[test]
     fn a_named_victim_stands_while_it_is_eligible(snap in snapshot(), trigger in triggers()) {
         let Some(named) = snap.named_victim.clone() else { return Ok(()) };
         let critical = matches!(trigger, Trigger::Memory { critical: true } | Trigger::Cpu { critical: true });
-        let eligible = snap.tickets.iter().find(|t| t.id == named).is_some_and(|t| {
-            is_candidate(t) && (t.class != Class::Quiet || critical || over_by(&snap, t, trigger).is_some())
+        let any_over = snap.tickets.iter().any(|t| is_candidate(t) && over_by(&snap, t, trigger).is_some());
+        let named_ticket = snap.tickets.iter().find(|t| t.id == named && is_candidate(t));
+        let named_over = named_ticket.is_some_and(|t| over_by(&snap, t, trigger).is_some());
+        let eligible = named_ticket.is_some_and(|t| {
+            named_over || (!any_over && (t.class != Class::Quiet || critical))
         });
         let blocked = !snap.live_stop_markers.is_empty() || snap.recreated_recently();
-        if eligible && !blocked {
+        if blocked {
+            return Ok(());
+        }
+        if eligible {
             prop_assert_eq!(choose_victim(&snap, trigger), Some(named));
+        } else if any_over {
+            prop_assert_ne!(choose_victim(&snap, trigger), Some(named));
         }
     }
 }
