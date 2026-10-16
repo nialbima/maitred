@@ -25,18 +25,23 @@ proptest! {
         }
     }
 
-    /// MT-043: the victim's holder has passed within the stall limit (three without reliable
-    /// load; from its admission before its first pass), unless the machine woke within one.
+    /// MT-043: the victim's holder is no more than a stall limit behind the freshest live holder of
+    /// a running job of this boot (from its admission before its first pass), unless the machine
+    /// woke within a stall limit.
     #[test]
-    fn the_victims_holder_is_still_passing(snap in snapshot(), trigger in triggers()) {
+    fn the_victims_holder_hasnt_fallen_behind(snap in snapshot(), trigger in triggers()) {
         if let Some(victim) = choose_victim(&snap, trigger) {
-            let t = snap.tickets.iter().find(|t| t.id == victim).expect("the victim is one of the snapshot's tickets");
             let stall = snap.config.stall_limit_ms();
             let woke = snap.load.as_ref().and_then(|l| l.woke_at).into_iter().chain(snap.my_wake)
                 .any(|w| snap.now.since(w) < stall);
-            let limit = if snap.reliable_load().is_some() { stall } else { stall * 3 };
-            let last = t.holder_pass.or(t.admitted_at).expect("a running ticket was admitted");
-            prop_assert!(woke || snap.now.since(last) <= limit);
+            let passes = snap.load.as_ref().map(|l| l.holder_passes.clone()).unwrap_or_default();
+            let pass = |t: &Ticket| passes.get(&t.id).copied().or(t.admitted_at);
+            let freshest = snap.tickets.iter()
+                .filter(|t| t.state == State::Running && t.holder_alive && t.is_this_boot())
+                .filter_map(pass).max().expect("the victim's own holder is live");
+            let t = snap.tickets.iter().find(|t| t.id == victim).expect("the victim is one of the snapshot's tickets");
+            let mine = pass(t).expect("a running ticket was admitted");
+            prop_assert!(woke || freshest.since(mine) <= stall);
         }
     }
 

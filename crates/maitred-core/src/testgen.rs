@@ -49,9 +49,6 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
             proptest::option::weighted(0.02, 0..20u64),
             // How long ago a ticket past waiting was admitted, so recency varies.
             0..3_600_000u64,
-            // How long ago its holder last passed, if it has: past the stall limit (10 s) about
-            // one time in six, past three of them now and then.
-            proptest::option::weighted(0.95, 0..36_000u64),
         ),
     )
         .prop_map(
@@ -59,7 +56,7 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
                 (seq, class, state, liveness, holder_alive),
                 reservation,
                 pools,
-                (waited_ms, pass_age, recreated, admitted_ago, holder_pass_age),
+                (waited_ms, pass_age, recreated, admitted_ago),
             )| {
                 let pools: BTreeSet<Pool> =
                     pools.into_iter().map(|p| Pool(POOLS[p].into())).collect();
@@ -85,10 +82,6 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
                     slots,
                     waited_ms,
                     last_pass: BootTime(NOW.0 - pass_age),
-                    holder_pass: (state != State::Waiting)
-                        .then_some(holder_pass_age)
-                        .flatten()
-                        .map(|age| BootTime(NOW.0 - age)),
                     admitted_at: (state != State::Waiting)
                         .then_some(BootTime(NOW.0 - admitted_ago)),
                     // Rarely recent, so most snapshots get past the recreation rule.
@@ -141,6 +134,13 @@ fn load() -> impl Strategy<Value = Option<Load>> {
             (0..8u32, 0..8u32),
             // Woke recently (within the 10 s stall limit) in about 10%, so stalls are suspended.
             proptest::option::weighted(0.1, 0..20_000u64),
+            // Holder passes up to 30 s old, so some holders fall a stall limit (10 s) behind the
+            // freshest; a missing one is judged from its admission.
+            proptest::collection::btree_map(
+                (0..8usize).prop_map(|i| TicketId(format!("t{i}"))),
+                (0..30_000u64).prop_map(|ago| BootTime(NOW.0 - ago)),
+                0..8,
+            ),
         )
             .prop_map(
                 |(
@@ -150,6 +150,7 @@ fn load() -> impl Strategy<Value = Option<Load>> {
                     jobs,
                     (over_cpu_streak, over_gpu_streak),
                     woke,
+                    holder_passes,
                 )| Load {
                     sampled_at: BootTime(NOW.0 - age),
                     fresh,
@@ -163,6 +164,7 @@ fn load() -> impl Strategy<Value = Option<Load>> {
                     over_cpu_streak,
                     over_gpu_streak,
                     jobs,
+                    holder_passes,
                 },
             ),
     )

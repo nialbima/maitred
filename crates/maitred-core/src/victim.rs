@@ -119,24 +119,41 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
 /// A running job of this boot and namespace whose holder is alive and still passing, living or
 /// orphaned: only its holder can carry out a kill.
 fn is_candidate(snap: &Snapshot, t: &Ticket) -> bool {
-    t.state == State::Running && t.holder_alive && t.is_this_boot() && !holder_stopped(snap, t)
+    holder_runs(t) && !holder_stopped(snap, t)
 }
 
-/// Whether a job's holder hasn't passed within the stall limit (three of them without reliable
-/// load), judged from its admission before its first pass. A SIGSTOP can't be ignored, and a
-/// stopped holder can't act (MT-043). Nobody is judged so until a stall limit after a wake.
+/// Whether a job's holder has fallen more than a stall limit behind the freshest holder among the
+/// running jobs whose holder is alive (MT-043). A SIGSTOP can't be ignored, and a stopped holder
+/// can't act; judging against the other holders rather than the clock keeps a swap storm, which
+/// slows them all together, from dropping every one. Before its first pass a holder is judged from
+/// its job's admission, and nobody is judged so until a stall limit after a wake.
 fn holder_stopped(snap: &Snapshot, t: &Ticket) -> bool {
     if snap.woke_recently() {
         return false;
     }
-    let limit = if snap.reliable_load().is_some() {
-        snap.config.stall_limit_ms()
-    } else {
-        snap.config.stall_limit_ms().saturating_mul(3)
-    };
-    t.holder_pass
+    let freshest = snap
+        .tickets
+        .iter()
+        .filter(|o| holder_runs(o))
+        .filter_map(|o| holder_pass(snap, o))
+        .max();
+    match (freshest, holder_pass(snap, t)) {
+        (Some(freshest), Some(mine)) => freshest.since(mine) > snap.config.stall_limit_ms(),
+        _ => false,
+    }
+}
+
+/// A running job of this boot and namespace whose holder is alive.
+fn holder_runs(t: &Ticket) -> bool {
+    t.state == State::Running && t.holder_alive && t.is_this_boot()
+}
+
+/// When a job's holder last passed, as the sample has it, or its admission before the first pass.
+fn holder_pass(snap: &Snapshot, t: &Ticket) -> Option<BootTime> {
+    snap.load
+        .as_ref()
+        .and_then(|l| l.holder_passes.get(&t.id).copied())
         .or(t.admitted_at)
-        .is_some_and(|at| snap.now.since(at) > limit)
 }
 
 /// How far a job's use in the sample is over its reservation on one resource, if it is over. A job

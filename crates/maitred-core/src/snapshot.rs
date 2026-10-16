@@ -118,4 +118,7 @@ pub struct Load {
     /// Each running job's use, as the sampler copied it from the job's holder. Only measurements
     /// whose window overlaps the sample's own interval are copied.
     pub jobs: BTreeMap<TicketId, Resources>,
+    /// When each running job's holder last started a pass, copied from its use file whatever the
+    /// use's window (MT-043). None for a job whose holder hasn't passed yet.
+    pub holder_passes: BTreeMap<TicketId, BootTime>,
 }

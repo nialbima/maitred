@@ -51,6 +51,7 @@ fn load() -> Load {
         over_cpu_streak: 0,
         over_gpu_streak: 0,
         jobs: BTreeMap::new(),
+        holder_passes: BTreeMap::new(),
     }
 }
 
@@ -67,7 +68,6 @@ fn ticket(id: &str, seq: u64, class: Class, state: State) -> Ticket {
         slots: BTreeMap::new(),
         waited_ms: 0,
         last_pass: NOW,
-        holder_pass: (state != State::Waiting).then_some(NOW),
         admitted_at: (state != State::Waiting).then_some(BootTime(NOW.0 - 3_600_000)),
         recreated_at: None,
     }

@@ -48,6 +48,7 @@ fn load() -> Load {
         over_cpu_streak: 0,
         over_gpu_streak: 0,
         jobs: BTreeMap::new(),
+        holder_passes: BTreeMap::new(),
     }
 }
 
@@ -65,17 +66,23 @@ fn running(id: &str, class: Class, age_ms: u64) -> Ticket {
         slots: BTreeMap::new(),
         waited_ms: 0,
         last_pass: NOW,
-        holder_pass: Some(NOW),
         admitted_at: Some(BootTime(NOW.0 - age_ms)),
         recreated_at: None,
     }
 }
 
+/// Every running ticket's holder passed just now.
 fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
+    let mut load = load();
+    load.holder_passes = tickets
+        .iter()
+        .filter(|t| t.state == State::Running)
+        .map(|t| (t.id.clone(), NOW))
+        .collect();
     Snapshot {
         now: NOW,
         config: config(),
-        load: Some(load()),
+        load: Some(load),
         tickets,
         unreadable: 0,
         last_heavy: None,
@@ -693,15 +700,26 @@ fn a_named_victim_still_over_stands_even_when_another_is_further_over() {
     );
 }
 
-// MT-043 (Nick, 2026-10-16): a holder that hasn't passed within the stall limit can't act (SIGSTOP
-// can't be ignored), so its job isn't a candidate. The limit is 10 s here (5 polls of 2 s).
+// MT-043 (Nick, 2026-10-16): a holder more than a stall limit (10 s here, 5 polls of 2 s) behind
+// the freshest holder can't act (SIGSTOP can't be ignored), so its job isn't a candidate. Judged
+// against the other holders, not the clock, so a swap storm that slows them all drops none.
+
+fn holder_passed(snap: &mut Snapshot, id: &str, ago_ms: u64) {
+    snap.load
+        .as_mut()
+        .unwrap()
+        .holder_passes
+        .insert(TicketId(id.into()), BootTime(NOW.0 - ago_ms));
+}
 
 #[test]
-fn a_job_whose_holder_has_stopped_passing_is_not_chosen() {
+fn a_job_whose_holder_has_fallen_behind_the_others_is_not_chosen() {
     // Recency alone would take "stopped", the newest.
-    let mut stopped = running("stopped", Class::Heavy, 1_000);
-    stopped.holder_pass = Some(BootTime(NOW.0 - 10_001));
-    let snap = snapshot(vec![stopped, running("older", Class::Heavy, 60_000)]);
+    let mut snap = snapshot(vec![
+        running("stopped", Class::Heavy, 1_000),
+        running("older", Class::Heavy, 60_000),
+    ]);
+    holder_passed(&mut snap, "stopped", 10_001);
 
     assert_eq!(
         choose_victim(&snap, Trigger::Memory { critical: false }),
@@ -710,10 +728,12 @@ fn a_job_whose_holder_has_stopped_passing_is_not_chosen() {
 }
 
 #[test]
-fn a_holder_that_passed_exactly_a_stall_limit_ago_still_counts() {
-    let mut slow = running("slow", Class::Heavy, 1_000);
-    slow.holder_pass = Some(BootTime(NOW.0 - 10_000));
-    let snap = snapshot(vec![slow, running("older", Class::Heavy, 60_000)]);
+fn a_holder_exactly_a_stall_limit_behind_still_counts() {
+    let mut snap = snapshot(vec![
+        running("slow", Class::Heavy, 1_000),
+        running("older", Class::Heavy, 60_000),
+    ]);
+    holder_passed(&mut snap, "slow", 10_000);
 
     assert_eq!(
         choose_victim(&snap, Trigger::Memory { critical: false }),
@@ -722,10 +742,27 @@ fn a_holder_that_passed_exactly_a_stall_limit_ago_still_counts() {
 }
 
 #[test]
-fn a_named_victim_whose_holder_has_stopped_passing_gives_way() {
-    let mut named = running("named", Class::Heavy, 60_000);
-    named.holder_pass = Some(BootTime(NOW.0 - 30_000));
-    let mut snap = snapshot(vec![named, running("other", Class::Heavy, 120_000)]);
+fn holders_slowed_together_by_a_swap_storm_all_stay_candidates() {
+    let mut snap = snapshot(vec![
+        running("newest", Class::Heavy, 1_000),
+        running("older", Class::Heavy, 60_000),
+    ]);
+    holder_passed(&mut snap, "newest", 40_000);
+    holder_passed(&mut snap, "older", 31_000);
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("newest"))
+    );
+}
+
+#[test]
+fn a_named_victim_whose_holder_has_fallen_behind_gives_way() {
+    let mut snap = snapshot(vec![
+        running("named", Class::Heavy, 60_000),
+        running("other", Class::Heavy, 120_000),
+    ]);
+    holder_passed(&mut snap, "named", 30_000);
     snap.named_victim = Some(id("named"));
 
     assert_eq!(
@@ -735,18 +772,30 @@ fn a_named_victim_whose_holder_has_stopped_passing_gives_way() {
 }
 
 #[test]
-fn a_job_whose_holder_has_not_passed_yet_is_judged_from_its_admission() {
-    let mut fresh = running("fresh", Class::Heavy, 5_000);
-    fresh.holder_pass = None;
-    let mut silent = running("silent", Class::Heavy, 11_000);
-    silent.holder_pass = None;
-    let snap = snapshot(vec![silent.clone(), running("old", Class::Heavy, 60_000)]);
+fn a_holder_that_has_not_passed_yet_is_judged_from_its_admission() {
+    let mut snap = snapshot(vec![
+        running("silent", Class::Heavy, 11_000),
+        running("old", Class::Heavy, 60_000),
+    ]);
+    snap.load
+        .as_mut()
+        .unwrap()
+        .holder_passes
+        .remove(&id("silent"));
     assert_eq!(
         choose_victim(&snap, Trigger::Memory { critical: false }),
         Some(id("old"))
     );
 
-    let snap = snapshot(vec![fresh, running("old", Class::Heavy, 60_000)]);
+    let mut snap = snapshot(vec![
+        running("fresh", Class::Heavy, 5_000),
+        running("old", Class::Heavy, 60_000),
+    ]);
+    snap.load
+        .as_mut()
+        .unwrap()
+        .holder_passes
+        .remove(&id("fresh"));
     assert_eq!(
         choose_victim(&snap, Trigger::Memory { critical: false }),
         Some(id("fresh"))
@@ -754,27 +803,54 @@ fn a_job_whose_holder_has_not_passed_yet_is_judged_from_its_admission() {
 }
 
 #[test]
-fn nobody_is_judged_stopped_until_a_stall_limit_after_a_wake() {
-    // Every holder slept with the machine; none has passed since it woke.
-    let mut asleep = running("asleep", Class::Heavy, 1_000);
-    asleep.holder_pass = Some(BootTime(NOW.0 - 600_000));
-    let mut snap = snapshot(vec![asleep, running("older", Class::Heavy, 60_000)]);
-    snap.load.as_mut().unwrap().woke_at = Some(BootTime(NOW.0 - 3_000));
-    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("asleep")));
+fn a_lone_job_stays_a_candidate_however_long_its_holder_has_been_silent() {
+    // Nobody to fall behind: there is no other job to stop instead.
+    let mut snap = snapshot(vec![running("lone", Class::Heavy, 1_000)]);
+    holder_passed(&mut snap, "lone", 600_000);
 
-    snap.load.as_mut().unwrap().woke_at = None;
-    snap.my_wake = Some(BootTime(NOW.0 - 3_000));
-    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("asleep")));
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("lone"))
+    );
 }
 
 #[test]
-fn without_reliable_load_a_holder_has_three_stall_limits() {
-    let mut slow = running("slow", Class::Heavy, 1_000);
-    slow.holder_pass = Some(BootTime(NOW.0 - 25_000));
-    let mut snap = snapshot(vec![slow, running("older", Class::Heavy, 60_000)]);
-    snap.load.as_mut().unwrap().cpu_used_millicores = None;
-    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("slow")));
+fn nobody_is_judged_behind_until_a_stall_limit_after_a_wake() {
+    // The first holder to pass after a wake is far ahead of those that haven't yet.
+    let mut snap = snapshot(vec![
+        running("asleep", Class::Heavy, 1_000),
+        running("older", Class::Heavy, 60_000),
+    ]);
+    holder_passed(&mut snap, "asleep", 600_000);
+    snap.load.as_mut().unwrap().woke_at = Some(BootTime(NOW.0 - 3_000));
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("asleep"))
+    );
 
-    snap.tickets[0].holder_pass = Some(BootTime(NOW.0 - 30_001));
-    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("older")));
+    snap.load.as_mut().unwrap().woke_at = None;
+    snap.my_wake = Some(BootTime(NOW.0 - 3_000));
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("asleep"))
+    );
+}
+
+#[test]
+fn a_dead_holders_fresh_pass_doesnt_set_the_pace() {
+    // Only holders that are alive set the freshest pass.
+    let mut dead = running("dead", Class::Heavy, 120_000);
+    dead.holder_alive = false;
+    let mut snap = snapshot(vec![
+        dead,
+        running("slow", Class::Heavy, 1_000),
+        running("older", Class::Heavy, 60_000),
+    ]);
+    holder_passed(&mut snap, "slow", 20_000);
+    holder_passed(&mut snap, "older", 15_000);
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("slow"))
+    );
 }
