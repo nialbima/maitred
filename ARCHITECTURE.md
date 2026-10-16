@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 111, 2026-10-15):
+  Synced from the maitred architecture doc on claude.ai (rev 115, 2026-10-15):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -118,13 +118,34 @@ These modes separate users. Between processes of one user, which is what agents 
 A ticket is `tickets/<id>.tk`, mode `0644`, a file of two fixed 4 KiB slots:
 
 ```
-magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu_millicores u32 | mem_mb u32
-  | last_pass u64 | admitted_at u64 | recreated_at u64 | sid i32 | pgid i32 | holder_pid i32 | holder_start u64
-  | generation u64 | length u32 | crc32 u32 | JSON payload | zero padding to 4096
+offset  size  field
+     0     8  magic "MTRDTICK"
+     8     4  crc32 u32       IEEE CRC-32 of bytes 12 .. 96 + length
+    12     4  length u32      payload bytes, at most 4000
+    16     8  generation u64
+    24     1  major u8        4
+    25     1  minor u8        0
+    26     1  class u8        0 light, 1 heavy, 2 quiet
+    27     1  state u8        0 waiting, 1 admitted, 2 running
+    28     4  cpu_millicores u32
+    32     4  mem_mb u32
+    36     4  sid i32
+    40     8  seq u64
+    48     8  last_pass u64   ms on the boot clock; 0 = never
+    56     8  admitted_at u64 ms on the boot clock; 0 = never
+    64     8  recreated_at u64 ms on the boot clock; 0 = never
+    72     8  holder_start u64 the platform's own start time (below)
+    80     4  pgid i32
+    84     4  holder_pid i32
+    88     8  boot u64        first 8 bytes of SHA-256 over the boot id and pid namespace
+    96  ≤4000  JSON payload, then zero padding to 4096
 ```
 
-- **The checksum covers everything after the magic but itself,** so a slot torn anywhere fails it.
+- **Encoding.** Every integer is little-endian, whatever the machine, so the test kit's reader, a hex dump and a reader on another architecture agree without knowing the writer. The header is 96 bytes and every field sits at its natural alignment. The checksum (IEEE CRC-32, as `crc32fast` computes it) sits right after the magic so that what it covers is one run: bytes 12 to the end of the payload. A slot torn anywhere a reader looks fails it; the zero padding isn't covered, since a reader never uses it. A `length` over 4000 fails the slot. The header's `major` and `minor` are the payload's `v`: one version for the file.
 - **The fixed header carries everything another reader needs to place, charge and judge the ticket:** class, state, `seq`, reservation, when it last ran a pass, when it was admitted, whether it was just recreated, and its session and holder. So a reader that can't understand a newer payload still charges it at its own reservation, sees whether it has stalled, and can check its session (Versions). The magic never changes; `major` does.
+- **Times are on the boot clock,** the one that keeps counting through sleep and never steps: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time` converted with `mach_timebase_info` on macOS, in milliseconds. Every process of one boot shares it, so a wall-clock step (NTP, a person setting the date) can't make every waiter look stalled or a recreation look recent. `boot` says which boot the times and pids belong to: a reader compares it with its own before trusting either, which a reader that can't parse a newer payload still can.
+- **`holder_start`** is the platform's own value, only ever compared for equality with a fresh read of the same pid: on Linux, field 22 of `/proc/<pid>/stat` (clock ticks since boot); on macOS, `pbi_start_tvsec × 1000000 + pbi_start_tvusec` from `proc_pidinfo(PROC_PIDTBSDINFO)`.
+- **An unknown `class` or `state` code** (a newer minor) is read as heavy and running: the ticket keeps its place by `seq` and is charged at least its header's reservation and the heavy minimum.
 - **Writing.** The owner writes generation g+1 into the slot that holds g-1, then `fdatasync` on Linux (`fsync` on macOS, which orders nothing on the disk: after a power loss both slots may fail, and the ticket then reads as unknown and unlocked, which the sweep removes). The slot holding g stays intact throughout.
 - **Reading.** Read both slots in one 8 KiB read, keep those that pass, take the higher generation. If neither passes, read again, up to three times; a reader that still finds no valid slot treats the ticket as unknown (Versions).
 - **Creating without a gap.** Create `requests/<id>/` (mode `0700`; if it already exists and isn't ours, pick a new id), write its `project` file, then create `tickets/.new-<id>`, lock it, write the first slot and rename it to `<id>.tk`. A rename keeps the inode, and the lock lives on the inode, so the ticket appears already locked.
@@ -160,7 +181,7 @@ magic "MTRDTICK" (8) | major u8 | minor u8 | class u8 | state u8 | seq u64 | cpu
 - `boot`: read by the supervisor itself: Linux `/proc/sys/kernel/random/boot_id`; on macOS, the start time of process 1 from `sysctl` `KERN_PROC_PID`, which a sandbox allows. No dependence on the sampler.
 - `pidns`: the pid namespace on Linux; empty on macOS. Process ids are only compared within one boot and namespace.
 - `project`: the first 16 bytes of SHA-256 over the real path of the project's git common directory (or of its `.maitred/` outside git). Every worktree gets the same value, and two racing first runs can't disagree, since nothing is stored. The label is never shown to other users; `status` shows other users' tickets as user, class, reservation and state only.
-- `waited_ms` and the aging and hold timers run on the clock that stops while the machine sleeps, so a night's sleep doesn't age a ticket. `last_pass` is when the owner last started a pass, waiting or running; it is written before contending for `admit.lock` and again on every poll interval of the wait for it, so a slow lock never makes a live supervisor look stalled.
+- `waited_ms` and the aging and hold timers run on the clock that stops while the machine sleeps, so a night's sleep doesn't age a ticket. The payload's times are RFC 3339 for people; decisions use the header's, on the boot clock. `last_pass` is when the owner last started a pass, waiting or running; it is written before contending for `admit.lock` and again on every poll interval of the wait for it, so a slow lock never makes a live supervisor look stalled.
 - `leader`: the holder's pid, the session it leads, the job's first process group and the holder's start time. A holder counts as alive only if `kill(pid, 0)` succeeds or fails with EPERM, its start time still matches, and it isn't a zombie (`SZOMB` on macOS, state `Z` on Linux, from the same read): an exited holder its stopped supervisor hasn't reaped yet is dead. A `pgid` or `sid` of 0 or 1 is never accepted.
 - `flags`: how this run differs from an ordinary one, such as `edited-classes` (the class file differed from the committed or the default branch's copy) or `recreated` (the ticket was deleted under it).
 - `label`: the job's `--label`, or null. `wait --label` and `status` find jobs by it, and the test kit maps tickets to a scenario's jobs by it.
@@ -368,9 +389,12 @@ Each admission pass, after deciding, spends at most a few milliseconds removing 
 {
   "v": "4.0",
   "sampled_at": "2026-10-07T21:14:02.118Z",
+  "sampled_at_ms": 39201118,
+  "boot": "…",
   "interval_ms": 2000,
   "fresh": true,
   "woke_at": "2026-10-07T08:02:11Z",
+  "woke_at_ms": 81211,
   "capacity": { "cpu_millicores": 8000, "mem_mb": 16384 },
   "cpu_used_millicores": 4960,
   "cpu_pressure": 0.42,
@@ -390,6 +414,8 @@ Each admission pass, after deciding, spends at most a few milliseconds removing 
 
 - `quiet_streak`, `over_cpu_streak` and `over_gpu_streak` count consecutive samples under the quiet threshold and over the CPU-pressure and GPU kill ceilings, so `decide` and `choose_victim` need only this one file. All three restart after a sleep.
 - `seq_high` is the largest `seq` the sampler has seen in any ticket, so a new ticket's `seq` never goes backwards when tickets are deleted.
+- **Two kinds of time.** `sampled_at` and `woke_at` are RFC 3339 in UTC with milliseconds and a `Z`, for people. `sampled_at_ms` and `woke_at_ms` are the same moments on the boot clock (The ticket: two slots and a lock), and `boot` says which boot; decisions compare only those, and only when `boot` is the reader's own. `woke_at` and `woke_at_ms` are null if the machine hasn't slept since the sampler started.
+- **Absent or null.** A reading the platform doesn't have is absent: `gpu` on a machine with no readable GPU, `pressure` outside Linux and cgroups, `sleep_assertions` and `maitred_running_threads` outside macOS. A reading the platform should have but couldn't take is null and named in `missing`. Every other field is always present.
 - `gpu` is absent on a machine with no readable GPU.
 - Sleep assertions are counted, not named; `unexpected` excludes holders the machine config lists as expected.
 
