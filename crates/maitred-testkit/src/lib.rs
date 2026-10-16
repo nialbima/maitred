@@ -4,6 +4,7 @@
 
 pub mod checker;
 pub mod load_file;
+pub mod pause;
 pub mod regressions;
 pub mod ticket;
 pub mod timing;

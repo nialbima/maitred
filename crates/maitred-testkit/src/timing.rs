@@ -16,3 +16,9 @@ pub fn millis(n: u64) -> Duration {
 pub fn burn_duty_period() -> Duration {
     Duration::from_millis(10)
 }
+
+/// How often the pause controller looks for a newly paused process while it waits for one.
+#[must_use]
+pub fn pause_accept_retry() -> Duration {
+    Duration::from_millis(5)
+}

@@ -12,6 +12,7 @@ mod job;
 mod load;
 mod machine;
 mod outcome;
+mod pause;
 mod scenario;
 mod time;
 
@@ -24,5 +25,6 @@ pub use job::{Class, Job};
 pub use load::{Published, Publisher, Reading, Running, Sample};
 pub use machine::{Amount, ClassConfig, MachineConfig, Pool};
 pub use outcome::{End, Outcome, Trigger};
+pub use pause::PausePoint;
 pub use scenario::{Event, Invalid, Scenario};
 pub use time::{Ms, ms, secs};
