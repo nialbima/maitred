@@ -24,6 +24,10 @@ pub enum Event {
     /// The sampler stops, so no load file is published, until `until` (or to the end of the run). The last file
     /// published goes stale.
     SamplerDown { until: Option<Ms> },
+    /// A swap storm: until `until`, every holder passes no more often than every `holder_every`, while the sampler
+    /// keeps its interval (ARCHITECTURE rev 172, MT-043). The real runner makes it with SIGSTOP and CONT duty cycles on
+    /// the holders.
+    Storm { until: Ms, holder_every: Ms },
 }
 
 /// A reason a scenario can't be run as written.
@@ -54,6 +58,10 @@ pub enum Invalid {
     StopsBeforeLastEvent { until: Ms, last: Ms },
     /// A sampler outage ends no later than it starts.
     OutageEndsBeforeItStarts { at: Ms, until: Ms },
+    /// A storm ends no later than it starts.
+    StormEndsBeforeItStarts { at: Ms, until: Ms },
+    /// A storm whose holders pass no less often than the poll interval slows nothing.
+    StormSlowsNothing { holder_every: Ms },
     /// A sleep wakes no later than it starts.
     SleepEndsBeforeItStarts { at: Ms, wakes_at: Ms },
     /// A strict order is expected between two jobs that arrive less than a poll interval apart, which
@@ -147,6 +155,18 @@ impl Scenario {
         self.at(at, Event::Sleep { wakes_at })
     }
 
+    /// A storm from `at` to `until`, in which every holder passes no more often than every `holder_every`.
+    #[must_use]
+    pub fn storm(self, at: Ms, until: Ms, holder_every: Ms) -> Self {
+        self.at(
+            at,
+            Event::Storm {
+                until,
+                holder_every,
+            },
+        )
+    }
+
     /// `fault` happens at `at`.
     #[must_use]
     pub fn fault(self, at: Ms, fault: Fault) -> Self {
@@ -169,7 +189,10 @@ impl Scenario {
     pub fn arrivals(&self) -> impl Iterator<Item = (Ms, &Job)> {
         self.events.iter().filter_map(|(at, event)| match event {
             Event::Arrive(job) => Some((*at, job)),
-            Event::Fault(_) | Event::Sleep { .. } | Event::SamplerDown { .. } => None,
+            Event::Fault(_)
+            | Event::Sleep { .. }
+            | Event::SamplerDown { .. }
+            | Event::Storm { .. } => None,
         })
     }
 
@@ -219,6 +242,23 @@ impl Scenario {
                     at: *at,
                     wakes_at: *wakes_at,
                 });
+            }
+            if let Event::Storm {
+                until,
+                holder_every,
+            } = event
+            {
+                if until <= at {
+                    problems.push(Invalid::StormEndsBeforeItStarts {
+                        at: *at,
+                        until: *until,
+                    });
+                }
+                if *holder_every <= self.machine.poll_interval {
+                    problems.push(Invalid::StormSlowsNothing {
+                        holder_every: *holder_every,
+                    });
+                }
             }
             if let Event::Fault(fault) = event {
                 match self.arrival_of(fault.label()) {

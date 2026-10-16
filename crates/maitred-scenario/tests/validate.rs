@@ -507,3 +507,28 @@ fn a_job_alternating_with_no_period_is_refused() {
         Err(vec![Invalid::NoPeriod("a".into())])
     );
 }
+
+#[test]
+fn a_storm_that_ends_before_it_starts_is_refused() {
+    let scenario = two_jobs("backwards storm").storm(secs(3), secs(2), secs(2));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::StormEndsBeforeItStarts {
+            at: secs(3),
+            until: secs(2)
+        }])
+    );
+}
+
+#[test]
+fn a_storm_no_slower_than_the_poll_interval_slows_nothing_and_is_refused() {
+    let scenario = two_jobs("gentle storm").storm(secs(1), secs(3), ms(200));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::StormSlowsNothing {
+            holder_every: ms(200)
+        }])
+    );
+}

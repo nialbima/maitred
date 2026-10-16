@@ -37,6 +37,7 @@ pub fn admission() -> Vec<Scenario> {
         a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit(),
         near_tied_jobs_whose_order_flips_lose_exactly_one_promptly(),
         a_named_victim_whose_holder_is_stopped_gives_way(),
+        a_breach_during_a_swap_storm_still_stops_one_job(),
     ]
 }
 
@@ -670,14 +671,15 @@ fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
     .run_until(secs(4))
 }
 
-/// MT-043 (ARCHITECTURE rev 168): a running job whose holder hasn't passed within the stall limit isn't a kill
-/// candidate, so a stopped victim's holder can't hold up the kill policy. The holder is stopped before the breach,
-/// not during it, so its own holder can't act first and the run doesn't depend on who chooses first. `y` and `x` are heavy, each using 2000 MB
-/// of a 2048 MB reservation, so neither is over and the victim is the most recently admitted heavy job: `x`,
-/// admitted at about 1 s. `x`'s holder is stopped at 1.5 s. Outside load reaches 12000 MB at 2 s: 16384 - 12000 -
-/// 4000 = 384 MB available, under `kill_floor`. With no candidate over, the name `x` stands (Rule B) while `x` is a
-/// candidate; its holder's last pass is at most 1.5 s, so it is stale by 2.5 s, and `y` is named and stopped by
-/// the stall limit plus 2 poll intervals after the breach (3.4 s, with jitter 3.5 s). Without the rule nobody acts.
+/// MT-043 (ARCHITECTURE rev 172): a job whose holder's last pass is more than a stall limit behind the freshest pass
+/// among running jobs isn't a kill candidate, so a stopped victim's holder can't hold up the kill policy. `y` and `x`
+/// are heavy, each using 2000 MB of a 2048 MB reservation, so neither is over and the victim is the most recently
+/// admitted heavy job: `x`, admitted at about 1 s. `x`'s holder is stopped at 1.5 s, before the breach rather than
+/// during it, so `x`'s own holder can't act first and the run doesn't depend on who chooses first. Outside load
+/// reaches 12000 MB at 2 s: 16384 - 12000 - 4000 = 384 MB available, under `kill_floor`. With no candidate over, the
+/// name `x` stands (Rule B) while `x` is a candidate; `y`'s holder keeps passing, so by 2.5 s `x`'s last pass is a
+/// stall limit behind `y`'s, and `y` is named and stopped by the stall limit plus 2 poll intervals after the breach
+/// (3.4 s, with jitter 3.5 s). Without the rule nobody acts.
 fn a_named_victim_whose_holder_is_stopped_gives_way() -> Scenario {
     Scenario::new(
         "a named victim whose holder is stopped gives way to the next candidate",
@@ -705,6 +707,42 @@ fn a_named_victim_whose_holder_is_stopped_gives_way() -> Scenario {
     .expect(Expect::not_killed("x"))
     .expect(Expect::at_most_kills(Trigger::Memory, 1))
     .run_until(secs(5))
+}
+
+/// MT-043's second half (ARCHITECTURE rev 172): holders are judged against each other, not against the clock, so a
+/// swap storm that slows every holder can't exclude them all. From 1 s to 8 s every holder passes no more often than
+/// every 1.2 s, past the stall limit (1 s), while the sampler keeps its 200 ms interval, so the load stays fresh and
+/// the trigger can fire. `x` and `y` reserve 1000 MB and use 3100 and 3000; outside load reaches 10000 MB at 2 s:
+/// 16384 - 10000 - 6100 = 284 MB available, under `kill_floor`. When a holder decides, the newest copy of its own pass
+/// in the sample can be over 1.2 s old, so a rule judging each pass against the clock excludes every holder and stops
+/// nobody. Judged against the freshest pass, the freshest holder stays a candidate, and one job is stopped within
+/// two storm intervals of the breach and their jitter (2 + 2 × 1.44 s, so 5 s).
+fn a_breach_during_a_swap_storm_still_stops_one_job() -> Scenario {
+    Scenario::new(
+        "a memory breach during a swap storm that slows every holder still stops exactly one job",
+        MachineConfig::for_tests(),
+    )
+    .checks("MT-043")
+    .load(Sample::at(ms(0)))
+    .load(Sample::at(secs(2)).background(0, 10_000))
+    .arrive(
+        ms(0),
+        Job::new("x", Class::Light)
+            .reserves(500, 1_000)
+            .uses(500, 3_100)
+            .runs_for(secs(30)),
+    )
+    .arrive(
+        ms(300),
+        Job::new("y", Class::Light)
+            .reserves(500, 1_000)
+            .uses(500, 3_000)
+            .runs_for(secs(30)),
+    )
+    .storm(secs(1), secs(8), ms(1_200))
+    .expect(Expect::one_killed_by(&["x", "y"], Trigger::Memory, secs(5)))
+    .expect(Expect::at_most_kills(Trigger::Memory, 1))
+    .run_until(secs(9))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.
