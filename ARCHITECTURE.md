@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 187, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 188, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -291,7 +291,7 @@ wait(the first rule that held me)
 
 ### Settle and the minimums
 
-The minimum reservation per class bounds a burst within one pass; settle spaces heavy starts across passes, so each new job's ramp-up shows in the samples before the next one starts. The load figures themselves are fresh (CPU over the last 2 s interval, memory now): the lag settle covers is the job's own ramp-up, not measurement. Both numbers come from the observe-only data via the simulator. maitred refuses a machine config whose kill thresholds are out of order: cpu_kill_samples and gpu_kill_samples at least 1, and mem_critical below kill_floor below mem_floor. With no reliable load, admission is one job at a time anyway.
+The minimum reservation per class bounds a burst within one pass; settle spaces heavy starts across passes, so each new job's ramp-up shows in the samples before the next one starts. The load figures themselves are fresh (CPU over the last 2 s interval, memory now): the lag settle covers is the job's own ramp-up, not measurement. Both numbers come from the observe-only data via the simulator. maitred refuses a machine config whose kill thresholds are out of order: cpu_kill_samples and gpu_kill_samples at least 1, mem_critical below kill_floor below mem_floor, the stall ceilings (cpu_stall_ceiling, cpu_stall_kill_ceiling) within 0 to 1 and above 0, the runnable and thread ceilings above 0, and cpu_stall_kill_ceiling above cpu_stall_ceiling: a ceiling that can never be crossed turns its rule off without a word (MT-033). With no reliable load, admission is one job at a time anyway.
 
 ### Kill policy
 
