@@ -185,27 +185,36 @@ fn rule(line: usize, text: &str) -> Result<Rule, Why> {
 }
 
 /// The literal path a pattern starts with, after its `^`: letters, digits and `_ / + -`, and any
-/// punctuation escaped with a backslash. None when there is none, or when its last character is
-/// quantified, so the path isn't literal after all.
+/// punctuation escaped with a backslash. It must end where the program's name does: at the end of
+/// the pattern, a space, `(`, `$`, `[ ]`, `\s` or `\b`. None otherwise, so a pattern can't claim
+/// one program while matching another (`^bin/x[a-z]`, or `^bin/x|evil`, whose other half matches
+/// anywhere).
 fn program(pattern: &str) -> Option<String> {
-    let mut chars = pattern.strip_prefix('^')?.chars().peekable();
+    let rest = pattern.strip_prefix('^')?;
     let mut path = String::new();
-    while let Some(&c) = chars.peek() {
-        if c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-') {
-            path.push(c);
-            chars.next();
-        } else if c == '\\' {
-            chars.next();
-            match chars.next() {
-                Some(escaped) if escaped.is_ascii_punctuation() => path.push(escaped),
-                _ => return None,
+    let mut chars = rest.char_indices().peekable();
+    let end = loop {
+        match chars.next() {
+            Some((_, c)) if c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-') => {
+                path.push(c);
             }
-        } else {
-            break;
+            Some((at, '\\')) => match chars.peek() {
+                Some(&(_, escaped)) if escaped.is_ascii_punctuation() => {
+                    path.push(escaped);
+                    chars.next();
+                }
+                _ => break at,
+            },
+            Some((at, _)) => break at,
+            None => break rest.len(),
         }
-    }
-    let quantified = matches!(chars.peek(), Some('*' | '+' | '?' | '{'));
-    (!path.is_empty() && !quantified).then_some(path)
+    };
+    let after = &rest[end..];
+    let ends_here = after.is_empty()
+        || [" ", "(", "$", "[ ]", "\\s", "\\b"]
+            .iter()
+            .any(|boundary| after.starts_with(boundary));
+    (!path.is_empty() && ends_here).then_some(path)
 }
 
 /// A rule's options: space-separated `key=value` pairs, each key at most once (`slot` once per

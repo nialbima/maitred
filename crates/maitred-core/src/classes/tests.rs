@@ -138,6 +138,9 @@ fn the_program_is_the_literal_path_the_pattern_starts_with() {
         ("^bin/x\\.rb( |$)", "bin/x.rb"),
         ("^/usr/local/bin/mutant", "/usr/local/bin/mutant"),
         ("^bin/process-dataset$", "bin/process-dataset"),
+        ("^bin/x[ ]--fast", "bin/x"),
+        ("^bin/x\\s", "bin/x"),
+        ("^bin/x\\b", "bin/x"),
     ] {
         let rule = one_rule(&format!("x | {pattern} | heavy | why"));
         assert_eq!(rule.program, program, "{pattern}");
@@ -210,6 +213,11 @@ fn a_pattern_that_doesnt_start_with_its_programs_literal_path_is_invalid() {
         "^",
         // An escaped letter is a class, not a literal.
         "^bin/\\d",
+        // The path must end where the program's name does.
+        "^bin/x[a-z]",
+        "^bin/x.rb",
+        // A bare alternation would match its other half anywhere.
+        "^bin/x|evil",
     ] {
         assert_eq!(
             invalid(&format!("x | {pattern} | heavy | why")).why,
