@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use crate::{
-    Class, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Resources, Snapshot, State,
-    Ticket, TicketId, Wall,
+    BootTime, Class, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Resources, Snapshot,
+    State, Ticket, TicketId,
 };
 
-pub(crate) const NOW: Wall = Wall(1_000_000_000);
+pub(crate) const NOW: BootTime = BootTime(1_000_000_000);
 const POOLS: [&str; 2] = ["db", "port"];
 
 fn class() -> impl Strategy<Value = Class> {
@@ -76,10 +76,10 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
                     pools,
                     slots,
                     waited_ms,
-                    last_pass: Wall(NOW.0 - pass_age),
-                    admitted_at: (state != State::Waiting).then_some(Wall(NOW.0 - 60_000)),
+                    last_pass: BootTime(NOW.0 - pass_age),
+                    admitted_at: (state != State::Waiting).then_some(BootTime(NOW.0 - 60_000)),
                     // Rarely recent, so most snapshots get past the recreation rule.
-                    recreated_at: recreated.map(|age| Wall(NOW.0 - age * 1_000)),
+                    recreated_at: recreated.map(|age| BootTime(NOW.0 - age * 1_000)),
                 }
             },
         )
@@ -118,7 +118,7 @@ fn load() -> impl Strategy<Value = Option<Load>> {
                     jobs,
                     (over_cpu_streak, over_gpu_streak),
                 )| Load {
-                    sampled_at: Wall(NOW.0 - age),
+                    sampled_at: BootTime(NOW.0 - age),
                     fresh,
                     woke_at: None,
                     capacity: Resources::new(8_000, 16_000),
@@ -186,7 +186,7 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                     load,
                     tickets,
                     unreadable,
-                    last_heavy: last_heavy.map(|age| Wall(NOW.0 - age)),
+                    last_heavy: last_heavy.map(|age| BootTime(NOW.0 - age)),
                     moved: BTreeMap::new(),
                     live_stop_markers: marker
                         .map(|i| TicketId(format!("t{i}")))

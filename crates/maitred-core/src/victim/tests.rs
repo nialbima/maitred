@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    ClassMinimums, Config, Liveness, Load, Resources, Snapshot, State, Ticket, TicketId, Wall,
+    BootTime, ClassMinimums, Config, Liveness, Load, Resources, Snapshot, State, Ticket, TicketId,
 };
 
-const NOW: Wall = Wall(1_000_000_000);
+const NOW: BootTime = BootTime(1_000_000_000);
 
 fn config() -> Config {
     Config {
@@ -65,7 +65,7 @@ fn running(id: &str, class: Class, age_ms: u64) -> Ticket {
         slots: BTreeMap::new(),
         waited_ms: 0,
         last_pass: NOW,
-        admitted_at: Some(Wall(NOW.0 - age_ms)),
+        admitted_at: Some(BootTime(NOW.0 - age_ms)),
         recreated_at: None,
     }
 }
@@ -220,7 +220,7 @@ fn the_first_sample_after_a_sleep_triggers_nothing() {
 fn a_stale_load_file_triggers_nothing() {
     let mut snap = snapshot(vec![]);
     short_of_memory(&mut snap);
-    snap.load.as_mut().unwrap().sampled_at = Wall(NOW.0 - 6_001);
+    snap.load.as_mut().unwrap().sampled_at = BootTime(NOW.0 - 6_001);
 
     assert_eq!(trigger(&snap), None);
 }
@@ -237,7 +237,7 @@ fn nothing_triggers_while_a_live_stop_marker_exists() {
 #[test]
 fn nothing_triggers_while_a_ticket_was_just_recreated() {
     let mut recreated = running("recreated", Class::Light, 60_000);
-    recreated.recreated_at = Some(Wall(NOW.0 - 9_999));
+    recreated.recreated_at = Some(BootTime(NOW.0 - 9_999));
     let mut snap = snapshot(vec![recreated]);
     short_of_memory(&mut snap);
 
@@ -247,7 +247,7 @@ fn nothing_triggers_while_a_ticket_was_just_recreated() {
 #[test]
 fn a_recreation_older_than_the_stall_limit_no_longer_holds_the_trigger() {
     let mut recreated = running("recreated", Class::Light, 60_000);
-    recreated.recreated_at = Some(Wall(NOW.0 - 10_000));
+    recreated.recreated_at = Some(BootTime(NOW.0 - 10_000));
     let mut snap = snapshot(vec![recreated]);
     short_of_memory(&mut snap);
 
@@ -506,7 +506,7 @@ fn nobody_is_chosen_while_a_live_stop_marker_exists() {
 #[test]
 fn nobody_is_chosen_while_a_ticket_was_just_recreated() {
     let mut heavy = running("heavy", Class::Heavy, 60_000);
-    heavy.recreated_at = Some(Wall(NOW.0 - 1));
+    heavy.recreated_at = Some(BootTime(NOW.0 - 1));
 
     assert_eq!(
         choose_victim(&snapshot(vec![heavy]), Trigger::Memory { critical: false }),

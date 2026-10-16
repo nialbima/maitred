@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::snapshot::Reliable;
-use crate::{Class, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId, Wall};
+use crate::{
+    BootTime, Class, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId,
+};
 
 #[cfg(test)]
 mod props;
@@ -254,7 +256,7 @@ struct Walk<'a> {
     /// measured use, or its whole reservation when unmeasured). A drain frees no more than this.
     drained_mem: i128,
     heavy: u32,
-    last_heavy: Option<Wall>,
+    last_heavy: Option<BootTime>,
     living_charged: bool,
     admitted_on_paper: u32,
     slots_on_paper: BTreeMap<Pool, u32>,

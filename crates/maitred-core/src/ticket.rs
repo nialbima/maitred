@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Resources;
 
-/// A wall-clock instant, in milliseconds since the Unix epoch.
+/// An instant on the boot clock, in milliseconds: the clock that keeps counting through sleep and
+/// never steps (`CLOCK_BOOTTIME`, `mach_continuous_time`), shared by every process of one boot.
+/// Times from another boot mean nothing here; the store compares `boot` before building a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct Wall(pub u64);
+pub struct BootTime(pub u64);
 
-impl Wall {
+impl BootTime {
     /// Milliseconds from `earlier` to `self`; zero if `earlier` is later.
     #[must_use]
-    pub fn since(self, earlier: Wall) -> u64 {
+    pub fn since(self, earlier: BootTime) -> u64 {
         self.0.saturating_sub(earlier.0)
     }
 }
@@ -80,9 +82,9 @@ pub struct Ticket {
     /// How long it has waited, on the clock that stops while the machine sleeps.
     pub waited_ms: u64,
     /// When its owner last started a pass.
-    pub last_pass: Wall,
-    pub admitted_at: Option<Wall>,
-    pub recreated_at: Option<Wall>,
+    pub last_pass: BootTime,
+    pub admitted_at: Option<BootTime>,
+    pub recreated_at: Option<BootTime>,
 }
 
 impl Ticket {

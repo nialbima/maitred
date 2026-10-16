@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
-    ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources, Snapshot, State,
-    Ticket, TicketId, Wall,
+    BootTime, ClassMinimums, Config, Liveness, Load, Pool, PoolConfig, Position, Resources,
+    Snapshot, State, Ticket, TicketId,
 };
 
-const NOW: Wall = Wall(1_000_000_000);
+const NOW: BootTime = BootTime(1_000_000_000);
 
 /// A machine config with short, round numbers; each test that depends on one names it.
 fn config() -> Config {
@@ -67,7 +67,7 @@ fn ticket(id: &str, seq: u64, class: Class, state: State) -> Ticket {
         slots: BTreeMap::new(),
         waited_ms: 0,
         last_pass: NOW,
-        admitted_at: (state != State::Waiting).then_some(Wall(NOW.0 - 3_600_000)),
+        admitted_at: (state != State::Waiting).then_some(BootTime(NOW.0 - 3_600_000)),
         recreated_at: None,
     }
 }
@@ -117,7 +117,7 @@ fn a_lone_light_ticket_on_an_idle_machine_is_admitted() {
 #[test]
 fn nobody_is_admitted_while_a_ticket_was_recreated_within_the_stall_limit() {
     let mut other = ticket("other", 1, Class::Light, State::Running);
-    other.recreated_at = Some(Wall(NOW.0 - 9_999));
+    other.recreated_at = Some(BootTime(NOW.0 - 9_999));
     let snap = snapshot(vec![other, ticket("me", 2, Class::Light, State::Waiting)]);
 
     assert_eq!(
@@ -129,7 +129,7 @@ fn nobody_is_admitted_while_a_ticket_was_recreated_within_the_stall_limit() {
 #[test]
 fn a_recreation_older_than_the_stall_limit_no_longer_holds_admission() {
     let mut other = ticket("other", 1, Class::Light, State::Running);
-    other.recreated_at = Some(Wall(NOW.0 - 10_001));
+    other.recreated_at = Some(BootTime(NOW.0 - 10_001));
     let snap = snapshot(vec![other, ticket("me", 2, Class::Light, State::Waiting)]);
 
     assert_eq!(decide(&snap, &me()), admitted());
@@ -204,7 +204,7 @@ fn with_no_load_file_a_charged_orphan_does_not_keep_everyone_out() {
 #[test]
 fn with_no_load_file_nobody_counts_as_stalled() {
     let mut stuck = ticket("stuck", 1, Class::Light, State::Waiting);
-    stuck.last_pass = Wall(NOW.0 - 3_600_000);
+    stuck.last_pass = BootTime(NOW.0 - 3_600_000);
     let mut snap = snapshot(vec![stuck, ticket("me", 2, Class::Light, State::Waiting)]);
     snap.load = None;
 
@@ -228,7 +228,7 @@ fn a_sample_older_than_the_load_freshness_is_no_reliable_load() {
         ticket("running", 1, Class::Light, State::Running),
         ticket("me", 2, Class::Light, State::Waiting),
     ]);
-    snap.load.as_mut().unwrap().sampled_at = Wall(NOW.0 - 6_001);
+    snap.load.as_mut().unwrap().sampled_at = BootTime(NOW.0 - 6_001);
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
 }
@@ -239,7 +239,7 @@ fn a_sample_exactly_at_the_load_freshness_still_counts() {
         ticket("running", 1, Class::Light, State::Running),
         ticket("me", 2, Class::Light, State::Waiting),
     ]);
-    snap.load.as_mut().unwrap().sampled_at = Wall(NOW.0 - 6_000);
+    snap.load.as_mut().unwrap().sampled_at = BootTime(NOW.0 - 6_000);
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
@@ -618,7 +618,7 @@ fn first_in_never_waives_settle() {
     let mut mine = ticket("me", 1, Class::Heavy, State::Waiting);
     mine.reservation = Resources::new(64_000, 64_000);
     let mut snap = snapshot(vec![mine]);
-    snap.last_heavy = Some(Wall(NOW.0 - 29_999));
+    snap.last_heavy = Some(BootTime(NOW.0 - 29_999));
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Settle));
 }
@@ -626,7 +626,7 @@ fn first_in_never_waives_settle() {
 #[test]
 fn a_heavy_ticket_waits_out_settle_after_the_last_heavy_admission() {
     let mut snap = snapshot(vec![ticket("me", 1, Class::Heavy, State::Waiting)]);
-    snap.last_heavy = Some(Wall(NOW.0 - 29_999));
+    snap.last_heavy = Some(BootTime(NOW.0 - 29_999));
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Settle));
 }
@@ -634,7 +634,7 @@ fn a_heavy_ticket_waits_out_settle_after_the_last_heavy_admission() {
 #[test]
 fn a_heavy_ticket_is_admitted_once_settle_has_passed() {
     let mut snap = snapshot(vec![ticket("me", 1, Class::Heavy, State::Waiting)]);
-    snap.last_heavy = Some(Wall(NOW.0 - 30_000));
+    snap.last_heavy = Some(BootTime(NOW.0 - 30_000));
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
@@ -652,7 +652,7 @@ fn a_heavy_admitted_earlier_in_the_walk_starts_settle() {
 #[test]
 fn settle_does_not_hold_a_light_ticket() {
     let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
-    snap.last_heavy = Some(Wall(NOW.0 - 1));
+    snap.last_heavy = Some(BootTime(NOW.0 - 1));
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
@@ -915,7 +915,7 @@ fn a_stalled_waiter_neither_takes_budget_nor_blocks_anyone() {
     running.reservation = Resources::new(4_000, 1_000);
     let mut stalled = ticket("stalled", 1, Class::Light, State::Waiting);
     stalled.reservation = Resources::new(3_000, 1_000);
-    stalled.last_pass = Wall(NOW.0 - 10_001);
+    stalled.last_pass = BootTime(NOW.0 - 10_001);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(3_000, 1_000);
 
@@ -931,7 +931,7 @@ fn a_waiter_whose_last_pass_is_exactly_at_the_stall_limit_is_not_stalled() {
     running.reservation = Resources::new(4_000, 1_000);
     let mut slow = ticket("slow", 1, Class::Light, State::Waiting);
     slow.reservation = Resources::new(3_000, 1_000);
-    slow.last_pass = Wall(NOW.0 - 10_000);
+    slow.last_pass = BootTime(NOW.0 - 10_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(3_000, 1_000);
 
@@ -947,11 +947,11 @@ fn nobody_is_stalled_until_the_stall_limit_has_passed_since_the_machine_woke() {
     running.reservation = Resources::new(4_000, 1_000);
     let mut sleeper = ticket("sleeper", 1, Class::Light, State::Waiting);
     sleeper.reservation = Resources::new(3_000, 1_000);
-    sleeper.last_pass = Wall(NOW.0 - 3_600_000);
+    sleeper.last_pass = BootTime(NOW.0 - 3_600_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(3_000, 1_000);
     let mut snap = snapshot(vec![running, sleeper, mine]);
-    snap.load.as_mut().unwrap().woke_at = Some(Wall(NOW.0 - 9_999));
+    snap.load.as_mut().unwrap().woke_at = Some(BootTime(NOW.0 - 9_999));
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
 }
@@ -1060,7 +1060,7 @@ fn a_running_ticket_is_not_waiting_even_with_no_load_file() {
 #[test]
 fn a_recreation_exactly_at_the_stall_limit_no_longer_holds_admission() {
     let mut other = ticket("other", 1, Class::Light, State::Running);
-    other.recreated_at = Some(Wall(NOW.0 - 10_000));
+    other.recreated_at = Some(BootTime(NOW.0 - 10_000));
     let snap = snapshot(vec![other, ticket("me", 2, Class::Light, State::Waiting)]);
 
     assert_eq!(decide(&snap, &me()), admitted());
@@ -1088,11 +1088,11 @@ fn stalls_count_again_once_the_stall_limit_has_passed_since_waking() {
     running.reservation = Resources::new(4_000, 1_000);
     let mut sleeper = ticket("sleeper", 1, Class::Light, State::Waiting);
     sleeper.reservation = Resources::new(3_000, 1_000);
-    sleeper.last_pass = Wall(NOW.0 - 3_600_000);
+    sleeper.last_pass = BootTime(NOW.0 - 3_600_000);
     let mut mine = ticket("me", 2, Class::Light, State::Waiting);
     mine.reservation = Resources::new(3_000, 1_000);
     let mut snap = snapshot(vec![running, sleeper, mine]);
-    snap.load.as_mut().unwrap().woke_at = Some(Wall(NOW.0 - 10_000));
+    snap.load.as_mut().unwrap().woke_at = Some(BootTime(NOW.0 - 10_000));
 
     assert_eq!(decide(&snap, &me()), admitted());
 }

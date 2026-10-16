@@ -4,7 +4,7 @@
 
 use std::cmp::Reverse;
 
-use crate::{Class, Liveness, Resources, Snapshot, State, Ticket, TicketId, Wall};
+use crate::{BootTime, Class, Liveness, Resources, Snapshot, State, Ticket, TicketId};
 
 #[cfg(test)]
 mod props;
@@ -112,6 +112,6 @@ fn over(snap: &Snapshot, t: &Ticket, of: fn(Resources) -> u64) -> Option<u64> {
     used.checked_sub(reserved).filter(|&by| by > 0)
 }
 
-fn admitted(t: &Ticket) -> Wall {
+fn admitted(t: &Ticket) -> BootTime {
     t.admitted_at.unwrap_or_default()
 }

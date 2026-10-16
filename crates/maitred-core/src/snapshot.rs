@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Config, Position, Resources, Ticket, TicketId, Wall};
+use crate::{BootTime, Config, Position, Resources, Ticket, TicketId};
 
 /// Everything one pass knows, built by the store under `admit.lock` (ARCHITECTURE.md, One pass, step
 /// 3). `decide` and `choose_victim` read nothing else, so every waiter computes the same answer from
 /// the same snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
-    pub now: Wall,
+    pub now: BootTime,
     pub config: Config,
     /// `load/now.json`, or `None` when it couldn't be read.
     pub load: Option<Load>,
@@ -17,7 +17,7 @@ pub struct Snapshot {
     pub unreadable: u32,
     /// The last heavy admission: the latest of `load/admissions.jsonl` and the `admitted_at` of
     /// living heavy tickets.
-    pub last_heavy: Option<Wall>,
+    pub last_heavy: Option<BootTime>,
     /// Tickets an administrator moved (`maitred queue move`), from the machine root's `order` file:
     /// each sorts at its position instead of `(seq, 0)`. Ids with no ticket are ignored.
     pub moved: BTreeMap<TicketId, Position>,
@@ -72,10 +72,10 @@ pub(crate) struct Reliable {
 /// The sampler's latest sample, as `load/now.json` holds it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Load {
-    pub sampled_at: Wall,
+    pub sampled_at: BootTime,
     /// False for the first sample after a sleep.
     pub fresh: bool,
-    pub woke_at: Option<Wall>,
+    pub woke_at: Option<BootTime>,
     pub capacity: Resources,
     /// `None` when the reading is missing.
     pub cpu_used_millicores: Option<u64>,

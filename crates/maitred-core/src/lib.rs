@@ -2,7 +2,7 @@
 //! as pure functions over snapshots. Nothing here touches a file, a clock, a process, the environment
 //! or the network; `clippy.toml` in this crate refuses them.
 //!
-//! Time arrives as plain milliseconds: wall-clock instants as [`Wall`], and lengths of time as `u64`
+//! Time arrives as plain milliseconds: instants on the boot clock as [`BootTime`], and lengths of time as `u64`
 //! fields whose names end in `_ms`. A length measured on the clock that stops while the machine sleeps
 //! says so in its name (`waited_ms`).
 
@@ -21,5 +21,5 @@ pub use config::{ClassMinimums, Config, PoolConfig};
 pub use decide::{Admission, Decision, Limit, Reason, decide};
 pub use resources::Resources;
 pub use snapshot::{Load, Snapshot};
-pub use ticket::{Class, Liveness, Pool, Position, State, Ticket, TicketId, Wall};
+pub use ticket::{BootTime, Class, Liveness, Pool, Position, State, Ticket, TicketId};
 pub use victim::{Trigger, choose_victim, trigger};
