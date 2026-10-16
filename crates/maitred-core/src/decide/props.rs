@@ -84,7 +84,7 @@ proptest! {
 
     #[test]
     fn first_in_happens_only_when_nothing_living_is_charged(snap in snapshot()) {
-        let charged = snap.unreadable > 0 || snap.tickets.iter().any(living_charged);
+        let charged = snap.tickets.iter().any(living_charged);
         for (_, how) in admissions(&snap) {
             prop_assert!(!(how.first_in && charged));
         }
@@ -124,7 +124,15 @@ proptest! {
     fn no_two_admissions_take_one_slot(snap in snapshot()) {
         let admitted = admissions(&snap);
         for (pool, cfg) in &snap.config.pools {
-            let named = snap.tickets.iter().filter(|t| t.slots.get(pool).is_some_and(|&n| cfg.contains(n))).count();
+            // Taken as the spec counts it: distinct numbers in range, held by tickets past waiting.
+            let named = snap
+                .tickets
+                .iter()
+                .filter(|t| t.state != State::Waiting)
+                .filter_map(|t| t.slots.get(pool).copied())
+                .filter(|&n| cfg.contains(n))
+                .collect::<std::collections::BTreeSet<u32>>()
+                .len();
             let asking = admitted.iter().filter(|(t, _)| t.pools.contains(pool)).count();
             if asking > 0 {
                 prop_assert!(named + asking <= cfg.size as usize);
@@ -151,7 +159,7 @@ proptest! {
         let admitted = admissions(&snap);
         if admitted.iter().any(|(t, _)| t.class == Class::Quiet) && !admitted.iter().any(|(_, how)| how.fallback) {
             prop_assert_eq!(admitted.len(), 1);
-            prop_assert!(snap.unreadable == 0 && !snap.tickets.iter().any(living_charged));
+            prop_assert!(!snap.tickets.iter().any(living_charged));
         }
     }
 

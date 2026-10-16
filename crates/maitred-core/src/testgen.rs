@@ -60,12 +60,15 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
             )| {
                 let pools: BTreeSet<Pool> =
                     pools.into_iter().map(|p| Pool(POOLS[p].into())).collect();
-                // A ticket past waiting holds one slot of each pool it asked for (numbers don't matter
-                // to decide, only which tickets name a pool).
+                // A ticket past waiting holds one slot of each pool it asked for: its own number,
+                // index + 1, so no two tickets name one number (which can't happen for real).
                 let slots = if state == State::Waiting {
                     BTreeMap::new()
                 } else {
-                    pools.iter().map(|p| (p.clone(), 1)).collect()
+                    pools
+                        .iter()
+                        .map(|p| (p.clone(), u32::try_from(index).unwrap_or(u32::MAX) + 1))
+                        .collect()
                 };
                 Ticket {
                     id: TicketId(format!("t{index}")),

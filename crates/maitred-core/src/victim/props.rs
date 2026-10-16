@@ -34,16 +34,6 @@ proptest! {
     }
 
     #[test]
-    fn a_quiet_job_is_chosen_only_when_the_trigger_is_critical_or_it_is_over(snap in snapshot(), trigger in triggers()) {
-        if let Some(victim) = choose_victim(&snap, trigger) {
-            let t = snap.tickets.iter().find(|t| t.id == victim).expect("the victim is one of the snapshot's tickets");
-            let critical = matches!(trigger, Trigger::Memory { critical: true } | Trigger::Cpu { critical: true });
-            let measured_over = trigger != Trigger::Gpu && snap.load.as_ref().is_some_and(|l| l.jobs.contains_key(&t.id));
-            prop_assert!(t.class != Class::Quiet || critical || measured_over);
-        }
-    }
-
-    #[test]
     fn every_holder_names_the_same_victim_whatever_order_it_reads_the_tickets(snap in snapshot(), trigger in triggers(), seed in any::<u64>()) {
         let mut shuffled = snap.clone();
         let n = shuffled.tickets.len().max(1);

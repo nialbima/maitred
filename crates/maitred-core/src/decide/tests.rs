@@ -176,12 +176,19 @@ fn with_no_load_file_nobody_is_admitted_beside_a_charged_ticket() {
 }
 
 #[test]
-fn with_no_load_file_an_unreadable_ticket_counts_as_charged() {
+fn with_no_load_file_an_unreadable_ticket_does_not_keep_everyone_out() {
+    // MT-029 (Nick, 2026-10-16): like an orphan, an unreadable ticket never holds the queue.
     let mut snap = snapshot(vec![ticket("me", 1, Class::Light, State::Waiting)]);
     snap.load = None;
     snap.unreadable = 1;
 
-    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
 }
 
 #[test]
@@ -508,10 +515,14 @@ fn an_orphan_from_another_boot_is_not_charged() {
 
 #[test]
 fn an_unreadable_ticket_is_charged_the_heavy_minimum() {
+    // A living job that reserves nothing keeps first-in closed, so only the charge decides.
+    let mut living = ticket("living", 0, Class::Light, State::Running);
+    living.reservation = Resources::new(0, 0);
     let mut mine = ticket("me", 1, Class::Light, State::Waiting);
     mine.reservation = Resources::new(4_000, 1_000);
-    let mut snap = snapshot(vec![mine]);
+    let mut snap = snapshot(vec![living, mine]);
     snap.config.class_min.heavy = Resources::new(4_001, 0);
+    snap.config.class_min.light = Resources::new(0, 0);
     snap.unreadable = 1;
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
@@ -1436,17 +1447,18 @@ fn a_lapsed_ticket_whose_slot_a_living_job_holds_drains_the_machine() {
 }
 
 #[test]
-fn an_unreadable_tickets_heavy_minimum_counts_toward_what_a_drain_frees() {
+fn an_unreadable_ticket_is_not_counted_on_to_free_memory_in_a_drain() {
+    // MT-029: a drain waits only for living jobs it knows; an unreadable ticket may be a waiter,
+    // so what it is charged isn't counted as freed. 9 GB plus a 4 GB charge would fit 12 GB; 9
+    // alone doesn't, so the lapsed ticket doesn't drain.
     let mut running = ticket("running", 0, Class::Light, State::Running);
     running.reservation = Resources::new(1_000, 0);
     let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
     lapsed.reservation = Resources::new(1_000, 12_000);
     lapsed.waited_ms = 600_000 + 600_001;
-    let mut snap = snapshot(vec![
-        running,
-        lapsed,
-        ticket("me", 2, Class::Light, State::Waiting),
-    ]);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, lapsed, mine]);
     snap.unreadable = 1;
     snap.config.class_min.heavy = Resources::new(0, 4_000);
     let load = snap.load.as_mut().unwrap();
@@ -1454,10 +1466,7 @@ fn an_unreadable_tickets_heavy_minimum_counts_toward_what_a_drain_frees() {
     load.jobs
         .insert(TicketId("running".into()), Resources::new(1_000, 0));
 
-    assert_eq!(
-        decide(&snap, &me()),
-        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
-    );
+    assert_eq!(decide(&snap, &me()), admitted());
 }
 
 #[test]
@@ -1737,6 +1746,53 @@ fn an_aged_ticket_that_could_never_fit_holds_no_budget() {
         mine,
     ]);
     snap.load.as_mut().unwrap().mem_available_mb = Some(3_000);
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+// MT-029 (Nick, 2026-10-16): an unreadable ticket is charged the heavy minimum, like an orphan, but
+// never blocks first-in or quiet's idle check. If it is really running, the sample shows its load.
+
+#[test]
+fn an_unreadable_ticket_does_not_block_first_in() {
+    let mut mine = ticket("me", 1, Class::Heavy, State::Waiting);
+    mine.reservation = Resources::new(64_000, 1_000);
+    let mut snap = snapshot(vec![mine]);
+    snap.unreadable = 1;
+    snap.load.as_mut().unwrap().cpu_used_millicores = Some(1_000);
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            first_in: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn an_unreadable_ticket_does_not_keep_a_quiet_job_from_an_idle_machine() {
+    let mut snap = snapshot(vec![ticket("me", 1, Class::Quiet, State::Waiting)]);
+    snap.unreadable = 1;
+    snap.load.as_mut().unwrap().quiet_streak = 2;
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_slot_both_named_and_held_outside_counts_once() {
+    // Qualmaude's receipt on 620ed9b: the store lists only unnamed slots, but counting distinct
+    // numbers costs nothing and keeps a mistake there from hiding a free slot.
+    let pool = Pool("db".into());
+    let mut holder = ticket("holder", 0, Class::Light, State::Running);
+    holder.slots.insert(pool.clone(), 1);
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![holder, mine]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 2 });
+    snap.held_outside.insert(pool, [1].into());
 
     assert_eq!(decide(&snap, &me()), admitted());
 }

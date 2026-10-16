@@ -1,6 +1,6 @@
 //! Admission: `decide(snapshot, me)`, ARCHITECTURE.md's "Inside `decide`" line by line.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::snapshot::Reliable;
 use crate::{
@@ -190,8 +190,9 @@ fn fallback(snap: &Snapshot, mine: &Ticket, me: &TicketId, charged: &[&Ticket]) 
     if mine.class == Class::Quiet && !due_quiet(&snap.config, mine) {
         return Decision::Wait(Reason::QuietNeedsIdle);
     }
-    // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
-    let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
+    // As for first in, a charged orphan or unreadable ticket doesn't count: one that never ends
+    // must not hold the queue.
+    let nothing_charged = !charged.iter().any(|t| t.is_living());
     if let Err(reason) = slots_free(snap, mine, &BTreeMap::new()) {
         return Decision::Wait(reason);
     }
@@ -281,16 +282,15 @@ fn taken_in_range(
     cfg: PoolConfig,
     holder: impl Fn(&Ticket) -> bool,
 ) -> u64 {
+    // Distinct numbers: a number is taken or it isn't, however many places list it.
     let named = snap
         .tickets
         .iter()
         .filter(|o| o.state != State::Waiting && holder(o))
-        .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
-        .count();
-    let outside = snap.held_outside.get(pool).map_or(0, |numbers| {
-        numbers.iter().filter(|&&n| cfg.contains(n)).count()
-    });
-    u64::try_from(named + outside).unwrap_or(u64::MAX)
+        .filter_map(|o| o.slots.get(pool).copied());
+    let outside = snap.held_outside.get(pool).into_iter().flatten().copied();
+    let taken: BTreeSet<u32> = named.chain(outside).filter(|&n| cfg.contains(n)).collect();
+    u64::try_from(taken.len()).unwrap_or(u64::MAX)
 }
 
 /// The budget and the counts as the walk changes them on paper.
@@ -323,15 +323,16 @@ impl<'a> Walk<'a> {
             drained_mem: i128::from(load.mem_available_mb),
             heavy: 0,
             last_heavy: snap.last_heavy,
-            living_charged: snap.unreadable > 0 || charged.iter().any(|t| t.is_living()),
+            living_charged: charged.iter().any(|t| t.is_living()),
             admitted_on_paper: 0,
             slots_on_paper: BTreeMap::new(),
         };
-        // An unreadable ticket is locked, so living: charged the heavy minimum, which a drain frees.
+        // An unreadable ticket is treated like an orphan (MT-029): charged the heavy minimum, but it
+        // blocks neither first-in nor quiet's idle check, and no drain counts on freeing it, since
+        // it may be a waiter. If it is really running, the sample shows its load.
         let unreadable = walk.reserve_class(Class::Heavy, Resources::default());
         for _ in 0..snap.unreadable {
             walk.take(unreadable);
-            walk.drained_mem += i128::from(unreadable.mem_mb);
         }
         for t in charged {
             // A living job's use from the sample, if measured. Orphans count as using nothing, so
