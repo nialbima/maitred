@@ -601,3 +601,19 @@ fn no_kill_samples_is_refused() {
         )])
     );
 }
+
+#[test]
+fn a_quiet_threshold_not_strictly_between_0_and_1_is_refused() {
+    for threshold in [0, 1_000] {
+        let mut config = machine();
+        config.quiet_threshold_permille = threshold;
+
+        assert_eq!(
+            one_job_on(config).validate(),
+            Err(vec![Invalid::ConfigRefused(
+                "quiet_threshold above 0 and below 1"
+            )]),
+            "{threshold}"
+        );
+    }
+}

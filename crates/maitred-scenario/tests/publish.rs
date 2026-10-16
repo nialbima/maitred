@@ -401,3 +401,15 @@ fn every_holder_that_has_passed_is_in_the_sample_measured_or_not() {
         vec![("a".to_string(), ms(350)), ("b".to_string(), ms(120))]
     );
 }
+
+#[test]
+fn the_first_quiet_sample_after_a_gap_isnt_counted_as_quiet() {
+    let mut publisher = Publisher::new(&machine());
+    publisher.publish(&Sample::at(ms(200)), &[], None);
+
+    // 1000 ms since the last sample is past load_freshness (600 ms).
+    let after_gap = publisher.publish(&Sample::at(ms(1_200)), &[], None);
+    let next = publisher.publish(&Sample::at(ms(1_400)), &[], None);
+
+    assert_eq!((after_gap.quiet_streak, next.quiet_streak), (0, 1));
+}

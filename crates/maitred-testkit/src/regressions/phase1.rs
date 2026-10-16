@@ -40,6 +40,7 @@ pub fn admission() -> Vec<Scenario> {
         a_breach_during_a_swap_storm_still_stops_one_job(),
         on_linux_cpu_stall_over_its_ceiling_holds_admission(),
         on_macos_runnable_work_under_its_ceiling_doesnt_hold_admission(),
+        the_first_sample_after_a_sampler_gap_doesnt_count_toward_quiet(),
     ]
 }
 
@@ -778,6 +779,32 @@ fn on_macos_runnable_work_under_its_ceiling_doesnt_hold_admission() -> Scenario 
     .arrive(ms(0), Job::new("l", Class::Light).reserves(250, 256))
     .expect(Expect::admitted_by("l", ms(400)))
     .run_until(secs(2))
+}
+
+/// ARCHITECTURE rev 192 (QL's receipt on MT-033): the first sample after a gap in sampling longer than
+/// `load_freshness` counts toward no streak, quiet included. Samples here are 400 ms apart (freshness 1200 ms), twice
+/// the poll interval, so one sample's difference can't hide inside a poll. Outside demand of 4000 millicores (50%)
+/// keeps the quiet streak at 0 until the sampler stops at 0.5 s; the last sample is at 0.4 s. It is back at 2 s, a
+/// 1.6 s gap, and the machine is idle. Samples at 2.0, 2.4 and 2.8 s give a quiet streak of 0, 1 and 2, and `q` needs
+/// 2, so it starts at its first pass after 2.8 s. Counting the first sample after the gap as quiet would let it in
+/// after 2.4 s.
+fn the_first_sample_after_a_sampler_gap_doesnt_count_toward_quiet() -> Scenario {
+    let mut machine = MachineConfig::for_tests();
+    machine.sample_interval = ms(400);
+    machine.load_freshness = ms(1_200);
+    machine.stale_wait = ms(1_200);
+    Scenario::new(
+        "a quiet job waits for one more quiet sample after a gap in sampling",
+        machine,
+    )
+    .checks("MT-033")
+    .load(Sample::at(ms(0)).background(4_000, 0))
+    .load(Sample::at(ms(1_000)))
+    .arrive(ms(0), Job::new("q", Class::Quiet))
+    .sampler_down(ms(500), Some(ms(2_000)))
+    .expect(Expect::not_admitted_before("q", ms(2_800)))
+    .expect(Expect::admitted_by("q", ms(3_100)))
+    .run_until(secs(4))
 }
 
 /// The project's class file for the classification cases: one heavy program, one light one with a slot.

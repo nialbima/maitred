@@ -254,6 +254,10 @@ impl MachineConfig {
                 self.cpu_stall_kill_ceiling_permille > self.cpu_stall_ceiling_permille,
                 "cpu_stall_kill_ceiling above cpu_stall_ceiling",
             ),
+            (
+                (1..1_000).contains(&self.quiet_threshold_permille),
+                "quiet_threshold above 0 and below 1",
+            ),
         ]
         .into_iter()
         .filter(|(holds, _)| !holds)
