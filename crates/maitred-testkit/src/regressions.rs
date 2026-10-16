@@ -6,3 +6,4 @@
 mod phase1;
 
 pub use phase1::admission as phase1_admission;
+pub use phase1::classification as phase1_classification;

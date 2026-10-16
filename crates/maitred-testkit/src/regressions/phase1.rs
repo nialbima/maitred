@@ -4,7 +4,10 @@
 //! default of 1000 millicores and 512 MB, a 200 ms poll and sample interval, 3 s aging, a 3 s aging hold and a
 //! 1 s stall limit. Each scenario's comment works its numbers from "Inside `decide`" (ARCHITECTURE.md).
 
-use maitred_scenario::{Class, Expect, Job, MachineConfig, Reading, Sample, Scenario, ms, secs};
+use maitred_scenario::{
+    Class, ClassCase, Expect, Hook, Job, MachineConfig, Matched, Reading, Sample, Scenario, ms,
+    secs,
+};
 
 /// The admission scenarios of phase 1.
 #[must_use]
@@ -103,4 +106,182 @@ fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
     .arrive(ms(0), Job::new("a", Class::Light).reserves(1_000, 15_000))
     .arrive(ms(500), Job::new("b", Class::Light))
     .expect(Expect::admitted("b"))
+}
+
+/// The project's class file for the classification cases: one heavy program, one light one with a slot.
+const CLASSES: &str = "\
+# name    | pattern            | class | why                                  | options
+mutation  | ^bin/mutant( |$)   | heavy | every core for hours
+specs     | ^bin/rspec( |$)    | light | its databases come from a slot       | slot=test_env
+";
+
+/// The classification cases of phase 1: the hook's spotter and argv matching (ARCHITECTURE.md: Class files).
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one list of cases, each with the doc text it rests on"
+)]
+pub fn classification() -> Vec<ClassCase> {
+    let hook = |name, command| ClassCase::hook(name, CLASSES, command).pool("test_env");
+    let argv = |name, words: &[&str]| ClassCase::argv(name, CLASSES, words).pool("test_env");
+    let mutant = || Hook::refuse("bin/mutant");
+    vec![
+        // "When it finds a program that a rule other than none names ... it refuses"; anything else runs.
+        hook(
+            "ordinary commands no rule names run as they are",
+            "ls -la && git status",
+        )
+        .checks("r2-threat B2")
+        .expect_hook(Hook::Allow),
+        // "It never touches a command whose program is maitred itself, judged command by command ... while any
+        // other heavy program in the same string is still refused."
+        hook(
+            "a heavy program chained after a queued one",
+            "maitred -- bin/rspec && bin/mutant run",
+        )
+        .checks("r2-threat A3")
+        .expect_hook(mutant()),
+        hook(
+            "a heavy program after a maitred command",
+            "maitred status && bin/mutant run",
+        )
+        .checks("r4-classify C5")
+        .expect_hook(mutant()),
+        // Matching: "a path into the project (./bin/x, bin/x, or its absolute path) is rewritten relative to
+        // the project root"; the spotter compares "by its normalised path".
+        hook("a heavy program run as ./bin/x", "./bin/mutant run")
+            .checks("r2-threat B3")
+            .expect_hook(mutant()),
+        // The spotter "skips assignments and the wrappers above": nice is one of them.
+        hook(
+            "a heavy program behind nice and an assignment",
+            "FOO=1 nice -n 5 bin/mutant run",
+        )
+        .checks("r2-threat B3")
+        .expect_hook(mutant()),
+        // The spotter's paragraph names wrappers but not launchers, so as the doc reads, bundle exec hides the
+        // program from the hook. The finding asks for a refusal; this fails until the doc says launchers too.
+        hook(
+            "a heavy program behind bundle exec",
+            "bundle exec bin/mutant run",
+        )
+        .checks("r2-threat B3")
+        .expect_hook(mutant()),
+        // Command position includes "$(", "(" and "a newline", and the spotter never looks inside "a heredoc's
+        // body", so a command after the body is seen.
+        hook(
+            "a heavy program in command substitution",
+            "echo $(bin/mutant run)",
+        )
+        .checks("r3-threat T8")
+        .expect_hook(mutant()),
+        hook("a heavy program in a subshell", "(bin/mutant run)")
+            .checks("r3-threat T8")
+            .expect_hook(mutant()),
+        hook(
+            "a heavy program after a heredoc",
+            "cat <<EOF\nhello\nEOF\nbin/mutant run",
+        )
+        .checks("r3-threat T8")
+        .expect_hook(mutant()),
+        hook(
+            "a heredoc body that mentions a heavy program",
+            "git commit -F - <<'EOF'\nrun bin/mutant run tonight\nEOF",
+        )
+        .checks("r4-classify C2")
+        .expect_hook(Hook::Allow),
+        // Command position includes "|&", "&|" and "&!" (the last two zsh's).
+        hook("a heavy program after |&", "echo hi |& bin/mutant run")
+            .checks("r4-classify C3")
+            .expect_hook(mutant()),
+        hook("a heavy program after zsh's &|", "true &| bin/mutant run")
+            .checks("r4-classify C3")
+            .expect_hook(mutant()),
+        hook("a heavy program after zsh's &!", "true &! bin/mutant run")
+            .checks("r4-classify C3")
+            .expect_hook(mutant()),
+        // "do" is a command position, so a loop's body is seen.
+        hook(
+            "a heavy program inside a for loop",
+            "for f in a b; do bin/mutant run; done",
+        )
+        .checks("r4-classify C4")
+        .expect_hook(mutant()),
+        // "if" and "while" aren't in the doc's list, so these fail until MT-002 is fixed.
+        hook(
+            "a heavy program after if",
+            "if bin/mutant run; then echo ok; fi",
+        )
+        .checks("r4-classify C4")
+        .expect_hook(mutant()),
+        hook(
+            "a heavy program after while",
+            "while bin/mutant run; do :; done",
+        )
+        .checks("r4-classify C4")
+        .expect_hook(mutant()),
+        // Matching strips launchers the machine config lists, such as bundle exec, then matches the rule.
+        argv("specs behind bundle exec", &["bundle", "exec", "bin/rspec"])
+            .checks("r2-threat B3")
+            .expect_match(Matched::queued(Class::Light).rule("specs").slot("test_env")),
+        // Matching strips wrappers "repeatedly: leading NAME=value assignments, then wrappers".
+        argv(
+            "a heavy program behind env and nice",
+            &["env", "FOO=1", "nice", "-n", "5", "bin/mutant", "run"],
+        )
+        .checks("r3-threat T10")
+        .expect_match(Matched::queued(Class::Heavy).rule("mutation")),
+        // Keep-awake wrappers refuse the job only "as the program after stripping; the word as an argument
+        // (rg caffeinate) does not". rg matches no rule, so it is heavy.
+        argv("a keep-awake word as an argument", &["rg", "caffeinate"])
+            .checks("r2-threat A14")
+            .expect_match(Matched::queued(Class::Heavy)),
+        argv(
+            "a keep-awake wrapper as the program",
+            &["caffeinate", "-i", "bin/mutant", "run"],
+        )
+        .checks("r2-threat A14")
+        .expect_match(Matched::Refused),
+        // A shell string "takes the strictest class among the programs it finds, every slot any of them asks
+        // for, and their largest reservation". Programs no rule names add nothing.
+        argv(
+            "two queued programs in one shell string",
+            &["sh", "-c", "bin/rspec && bin/mutant run"],
+        )
+        .checks("r3-threat T12")
+        .checks("r4-classify C14")
+        .expect_match(Matched::queued(Class::Heavy).slot("test_env")),
+        argv(
+            "a light program piped into an ordinary helper",
+            &["sh", "-c", "bin/rspec | tail -40"],
+        )
+        .checks("r4-classify C1")
+        .expect_match(Matched::queued(Class::Light).slot("test_env")),
+        // "An invalid file ... makes every command heavy, with a warning naming the bad line." This rule has no
+        // why, which makes the file invalid.
+        ClassCase::argv(
+            "an invalid class file",
+            "specs | ^bin/rspec( |$) | light\n",
+            &["bin/rspec"],
+        )
+        .checks("r2-threat A9")
+        .expect_match(Matched::queued(Class::Heavy)),
+        // "A rule asking for a pool this machine doesn't declare is skipped with a warning instead": only that
+        // rule. With no pool declared, specs is skipped and bin/rspec matches nothing, so it is heavy, while
+        // mutation still matches.
+        ClassCase::argv(
+            "a rule asking for an undeclared pool skips only itself",
+            CLASSES,
+            &["bin/mutant", "run"],
+        )
+        .checks("r4-classify C8")
+        .expect_match(Matched::queued(Class::Heavy).rule("mutation")),
+        ClassCase::argv(
+            "the skipped rule's program falls to heavy",
+            CLASSES,
+            &["bin/rspec"],
+        )
+        .checks("r4-classify C8")
+        .expect_match(Matched::queued(Class::Heavy)),
+    ]
 }
