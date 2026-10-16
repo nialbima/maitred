@@ -120,7 +120,10 @@ fn at_most_one_victim_per_breach_fails_on_a_second_kill_for_one_trigger() {
 #[test]
 fn a_record_that_ended_as_expected_passes() {
     let scenario = two_heavy_jobs().expect(Expect::ends("a", End::Completed { status: 0 }));
-    let outcome = Outcome::new().ended("a", End::Completed { status: 0 });
+    let outcome =
+        Outcome::new()
+            .admitted("a", ms(100))
+            .ended_at("a", End::Completed { status: 0 }, ms(900));
 
     assert_eq!(scenario.judge(&outcome), Ok(()));
 }
@@ -128,7 +131,10 @@ fn a_record_that_ended_as_expected_passes() {
 #[test]
 fn a_record_that_ended_differently_fails_and_says_how_it_ended() {
     let scenario = two_heavy_jobs().expect(Expect::ends("a", End::Completed { status: 0 }));
-    let outcome = Outcome::new().ended("a", End::Killed(Trigger::Memory));
+    let outcome =
+        Outcome::new()
+            .admitted("a", ms(100))
+            .ended_at("a", End::Killed(Trigger::Memory), ms(900));
 
     assert_eq!(
         scenario.judge(&outcome),
@@ -306,4 +312,56 @@ fn not_admitted_before_a_time_fails_when_it_started_early() {
             at: ms(4_999)
         }])
     );
+}
+
+#[test]
+fn a_job_admitted_twice_is_a_failure_whatever_the_expectations() {
+    let scenario = two_heavy_jobs().expect(Expect::never_together("a", "b"));
+    let outcome = Outcome::new()
+        .admitted("a", ms(0))
+        .ended_at("a", End::Completed { status: 0 }, ms(1_000))
+        .admitted("b", ms(1_500))
+        .admitted("a", ms(2_000));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::AdmittedTwice("a".into())])
+    );
+}
+
+#[test]
+fn a_job_that_ended_twice_is_a_failure() {
+    let scenario = two_heavy_jobs().expect(Expect::ends("a", End::Completed { status: 0 }));
+    let outcome = Outcome::new()
+        .admitted("a", ms(0))
+        .ended_at("a", End::Completed { status: 0 }, ms(1_000))
+        .ended_at("a", End::Killed(Trigger::Memory), ms(1_100));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::EndedTwice("a".into())])
+    );
+}
+
+#[test]
+fn a_job_that_ended_before_it_was_admitted_is_a_failure() {
+    let scenario = two_heavy_jobs();
+    let outcome = Outcome::new()
+        .ended_at("a", End::Cancelled, ms(500))
+        .admitted("a", ms(1_000));
+
+    assert_eq!(
+        scenario.judge(&outcome),
+        Err(vec![Failure::EndedBeforeAdmitted("a".into())])
+    );
+}
+
+#[test]
+fn outcome_entries_are_judged_by_their_times_not_the_order_they_were_reported() {
+    let scenario = two_heavy_jobs().expect(Expect::admitted_before("a", "b"));
+    let outcome = Outcome::new()
+        .admitted("b", ms(5_100))
+        .admitted("a", ms(100));
+
+    assert_eq!(scenario.judge(&outcome), Ok(()));
 }

@@ -55,6 +55,12 @@ impl Header {
         }
     }
 
+    /// Whether both the class and the state code are ones this reader knows.
+    #[must_use]
+    pub fn codes_known(&self) -> bool {
+        self.class <= 2 && self.state <= 2
+    }
+
     /// The state, reading a code this reader doesn't know as running.
     #[must_use]
     pub fn state(&self) -> StateCode {
@@ -72,15 +78,15 @@ pub enum SlotError {
     Magic,
     Length(u32),
     Checksum,
-    /// The payload isn't UTF-8.
-    Payload,
 }
 
 /// What a reader makes of a whole ticket file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
     /// The newest slot that passed its checks.
-    Valid { header: Header, payload: String },
+    /// The payload is kept as bytes: a slot is valid on its checksum, and a reader that can't parse the
+    /// payload still places and charges the ticket from its header (Versions).
+    Valid { header: Header, payload: Vec<u8> },
     /// Neither slot passed, or the file isn't two slots long.
     Unknown,
 }
@@ -95,9 +101,10 @@ impl Read {
     }
 
     #[must_use]
+    /// The payload as text, or `None` if there is no valid slot or the payload isn't UTF-8.
     pub fn payload(&self) -> Option<&str> {
         match self {
-            Read::Valid { payload, .. } => Some(payload),
+            Read::Valid { payload, .. } => std::str::from_utf8(payload).ok(),
             Read::Unknown => None,
         }
     }
@@ -138,7 +145,7 @@ fn u64_at(slot: &[u8], at: usize) -> u64 {
 /// # Errors
 ///
 /// Returns why the slot can't be used.
-pub fn decode_slot(slot: &[u8; SLOT]) -> Result<(Header, String), SlotError> {
+pub fn decode_slot(slot: &[u8; SLOT]) -> Result<(Header, Vec<u8>), SlotError> {
     if &slot[0..8] != MAGIC {
         return Err(SlotError::Magic);
     }
@@ -169,8 +176,7 @@ pub fn decode_slot(slot: &[u8; SLOT]) -> Result<(Header, String), SlotError> {
         holder_pid: i32_at(slot, 84),
         boot: u64_at(slot, 88),
     };
-    let payload = std::str::from_utf8(&slot[HEADER..end]).map_err(|_| SlotError::Payload)?;
-    Ok((header, payload.to_string()))
+    Ok((header, slot[HEADER..end].to_vec()))
 }
 
 /// Encodes one slot: the test kit's own writer, for building tickets and torn states in tests and faults.
@@ -214,7 +220,9 @@ pub fn encode_slot(header: &Header, payload: &str) -> [u8; SLOT] {
     slot
 }
 
-/// Reads a whole ticket file as the doc says: keep the slots that pass, take the higher generation.
+/// Reads a whole ticket file as the doc says: keep the slots that pass, take the higher generation. With two valid
+/// slots of one generation, which no correct writer leaves, the second is read. The doc's "read again, up to
+/// three times" is the caller's: this reads the bytes it is given once.
 #[must_use]
 pub fn read_ticket(bytes: &[u8]) -> Read {
     if bytes.len() != 2 * SLOT {

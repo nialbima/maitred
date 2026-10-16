@@ -8,18 +8,24 @@
 //!      [--print-every-ms P] [--port] [--report PATH]
 //!      [--children N --child-run-ms T] [--orphan-child-run-ms T]
 //!      [--daemon setsid|setpgid --daemon-run-ms T [--daemon-report PATH]]
-//!      [--on-term ignore|exit] [--on-int ignore|exit]
+//!      [--on-term ignore|exit] [--on-int ignore|exit] [--ready PATH]
 //! ```
 //!
-//! Children, orphans and daemons are `burn` again, started with no load of their own. A signal it is told to
-//! `exit` on ends the run early with status 0 and is named in the report; one it is told to `ignore` changes
-//! nothing; any other keeps its default action.
+//! Children, orphans and daemons are `burn` again, started with no load of their own and with TERM and INT at
+//! their default action, whatever this `burn` does with them. A signal it is told to `exit` on ends the run
+//! early with status 0 and is named in the report; one it is told to `ignore` changes nothing; any other keeps
+//! its default action. With `--exit` on a signal, it still waits for the children it started (not the orphan or
+//! the daemon) before it exits.
 //!
-//! Exits 64 on an argument it doesn't know.
+//! `--ready PATH` is written once the signal handlers are in and every child has started. It lists `pid`,
+//! `orphan` and `children` in the report's format, so a test or the runner signals `burn` only once it is ready.
+//!
+//! Exits 64 on an argument it doesn't know or `--print-every-ms 0`, and 71 if `setsid` or `setpgid` fails.
 
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::net::TcpListener;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -30,6 +36,7 @@ use std::{env, fs};
 use maitred_testkit::timing::{burn_duty_period, millis};
 
 const USAGE: u8 = 64;
+const OS_ERROR: u8 = 71;
 
 /// Set by a signal handler when a signal burn was told to exit on arrives.
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -72,6 +79,7 @@ struct Args {
     on_int: OnSignal,
     /// Set on a daemon started by another burn: what it leaves before doing anything else.
     detach: Option<Detach>,
+    ready: Option<String>,
 }
 
 fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -87,7 +95,14 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
             "--exit" => args.exit = number(&value()?)?,
             "--cpu-millicores" => args.cpu_millicores = number(&value()?)?,
             "--mem-mb" => args.mem_mb = number(&value()?)?,
-            "--print-every-ms" => args.print_every_ms = Some(number(&value()?)?),
+            "--print-every-ms" => {
+                let every: u64 = number(&value()?)?;
+                if every == 0 {
+                    return Err("--print-every-ms must be more than 0".into());
+                }
+                args.print_every_ms = Some(every);
+            }
+            "--ready" => args.ready = Some(value()?),
             "--port" => args.port = true,
             "--report" => args.report = Some(value()?),
             "--children" => args.children = number(&value()?)?,
@@ -144,25 +159,33 @@ fn handle(signal: libc::c_int, how: OnSignal) {
     }
 }
 
-/// Leaves the session or the process group, as a daemon does.
-fn leave(how: Detach) {
+/// Leaves the session or the process group, as a daemon does. Returns false if the call failed.
+fn leave(how: Detach) -> bool {
     // SAFETY: setsid and setpgid act only on the calling process; burn has started no threads yet.
-    unsafe {
+    let result = unsafe {
         match how {
             Detach::Session => libc::setsid(),
             Detach::Group => libc::setpgid(0, 0),
-        };
-    }
+        }
+    };
+    result != -1
 }
 
 /// Starts burn again with no load of its own, running for `run_ms`, plus `extra` arguments.
 fn start_burn(run_ms: u64, extra: &[&str]) -> Child {
     let exe = env::current_exe().expect("burn: can't find its own binary");
-    Command::new(exe)
-        .args(["--run-ms", &run_ms.to_string()])
-        .args(extra)
-        .spawn()
-        .expect("burn: can't start a child")
+    let mut command = Command::new(exe);
+    command.args(["--run-ms", &run_ms.to_string()]).args(extra);
+    // SAFETY: between fork and exec only `signal` runs, which is async-signal-safe. It puts TERM and INT back to
+    // their default action, which an ignored disposition would otherwise carry through exec into the child.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    command.spawn().expect("burn: can't start a child")
 }
 
 fn number<T: std::str::FromStr>(text: &str) -> Result<T, String> {
@@ -284,6 +307,45 @@ fn report(args: &Args, port: Option<u16>, children: &[u32], orphan: Option<u32>)
     text
 }
 
+/// Starts the children, the orphan and the daemon `args` ask for.
+fn start_children(args: &Args) -> (Vec<Child>, Option<Child>, Option<Child>) {
+    let children = (0..args.children)
+        .map(|_| start_burn(args.child_run_ms, &[]))
+        .collect();
+    let orphan = args
+        .orphan_child_run_ms
+        .map(|run_ms| start_burn(run_ms, &[]));
+    let daemon = args.daemon.map(|how| {
+        let how = if how == Detach::Session {
+            "setsid"
+        } else {
+            "setpgid"
+        };
+        let mut extra = vec!["--detach", how];
+        if let Some(path) = &args.daemon_report {
+            extra.extend(["--report", path]);
+        }
+        start_burn(args.daemon_run_ms, &extra)
+    });
+    (children, orphan, daemon)
+}
+
+/// Writes the ready file: burn's pid and its children's, in the report's format.
+fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>) {
+    let (process, _, _) = process_ids();
+    let ids: Vec<String> = children.iter().map(|c| c.id().to_string()).collect();
+    let text = format!(
+        "pid {process}\norphan {}\nchildren {}\n",
+        orphan.map_or_else(|| "none".into(), |o| o.id().to_string()),
+        if ids.is_empty() {
+            "none".into()
+        } else {
+            ids.join(",")
+        }
+    );
+    fs::write(path, text).expect("burn: can't write the ready file");
+}
+
 #[expect(
     clippy::print_stderr,
     reason = "a command-line program reports a usage error on stderr"
@@ -296,31 +358,32 @@ fn main() -> ExitCode {
             return ExitCode::from(USAGE);
         }
     };
-    if let Some(how) = args.detach {
-        leave(how);
+    if let Some(how) = args.detach
+        && !leave(how)
+    {
+        eprintln!(
+            "burn: can't leave the {}",
+            if how == Detach::Session {
+                "session"
+            } else {
+                "process group"
+            }
+        );
+        return ExitCode::from(OS_ERROR);
     }
     handle(libc::SIGTERM, args.on_term);
     handle(libc::SIGINT, args.on_int);
     let started = Instant::now();
-    let children: Vec<Child> = (0..args.children)
-        .map(|_| start_burn(args.child_run_ms, &[]))
-        .collect();
-    let mut orphan = args
-        .orphan_child_run_ms
-        .map(|run_ms| start_burn(run_ms, &[]));
-    let mut daemon = if let Some(how) = args.daemon {
-        let how = if how == Detach::Session {
-            "setsid"
-        } else {
-            "setpgid"
-        };
-        let mut extra = vec!["--detach", how];
-        if let Some(path) = &args.daemon_report {
-            extra.extend(["--report", path]);
+    let (children, mut orphan, mut daemon) = start_children(&args);
+    if let Some(path) = &args.ready {
+        write_ready(path, &children, orphan.as_ref());
+    }
+    let mut reap = || {
+        // The orphan and the daemon are meant to outlive burn, so burn never waits for them, but it collects
+        // either one as soon as it has exited, so no zombie of burn's lingers in the session.
+        for left_behind in [orphan.as_mut(), daemon.as_mut()].into_iter().flatten() {
+            let _ = left_behind.try_wait();
         }
-        Some(start_burn(args.daemon_run_ms, &extra))
-    } else {
-        None
     };
     let listener = args
         .port
@@ -339,14 +402,14 @@ fn main() -> ExitCode {
         let next = args.print_every_ms.map(|every| millis(every * (tick + 1)));
         match next {
             Some(at) if at < end => {
-                if !sleep_until(started, at) {
+                if !sleep_until(started, at, &mut reap) {
                     break;
                 }
                 tick += 1;
                 println!("{} tick {tick}", args.label_line());
             }
             _ => {
-                sleep_until(started, end);
+                sleep_until(started, end, &mut reap);
                 break;
             }
         }
@@ -360,11 +423,7 @@ fn main() -> ExitCode {
     for mut child in children {
         let _ = child.wait();
     }
-    // The orphan and the daemon are meant to outlive burn, so burn doesn't wait for them. It collects one
-    // that has already exited, so no zombie of burn's lingers in the session it leaves behind.
-    for left_behind in [orphan.as_mut(), daemon.as_mut()].into_iter().flatten() {
-        let _ = left_behind.try_wait();
-    }
+    reap();
     let orphan = orphan.as_ref().map(Child::id);
     if let Some(path) = &args.report {
         fs::write(path, report(&args, port, &child_ids, orphan))
@@ -378,12 +437,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Sleeps until `at` after `started`, waking early if a signal asked burn to exit. Returns false if it did.
-fn sleep_until(started: Instant, at: std::time::Duration) -> bool {
+/// Sleeps until `at` after `started`, calling `reap` every duty period and waking early if a signal asked burn
+/// to exit. Returns false if it did.
+fn sleep_until(started: Instant, at: std::time::Duration, reap: &mut impl FnMut()) -> bool {
     while let Some(left) = at.checked_sub(started.elapsed()) {
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
             return false;
         }
+        reap();
         thread::sleep(left.min(burn_duty_period()));
     }
     !EXIT_REQUESTED.load(Ordering::SeqCst)

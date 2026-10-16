@@ -160,3 +160,87 @@ fn a_job_whose_use_cant_be_measured_loads_the_machine_but_isnt_listed() {
     assert_eq!(load_file.mem_available_mb, 16_384 - 1_024);
     assert_eq!(load_file.jobs, vec![]);
 }
+
+#[test]
+fn maitreds_running_threads_sum_the_measured_jobs_threads() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(
+        &Sample::at(ms(200)),
+        &[
+            Running::measured("a", job(2_000, 0)).threads(3),
+            Running::measured("b", job(500, 0)).threads(1),
+            Running::unmeasured("c", job(4_000, 0)).threads(4),
+        ],
+        None,
+    );
+
+    assert_eq!(load_file.maitred_running_threads, 4);
+}
+
+#[test]
+fn a_samples_interval_begins_at_the_previous_sample_not_a_nominal_length_before() {
+    let mut publisher = Publisher::new(&machine());
+    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+
+    publisher.publish(&over(200), &[], None);
+    // A gap in sampling: this sample's interval began at 200, before the victim was gone at 1000.
+    let after_gap = publisher.publish(&over(2_000), &[], Some(ms(1_000)));
+
+    assert_eq!(
+        (after_gap.interval, after_gap.over_cpu_streak),
+        (ms(1_800), 0)
+    );
+}
+
+#[test]
+fn a_sample_that_began_exactly_when_the_victim_was_gone_doesnt_count() {
+    let mut publisher = Publisher::new(&machine());
+    let over = |at| Sample::at(ms(at)).background(40_000, 0);
+
+    publisher.publish(&over(200), &[], None);
+    publisher.publish(&over(400), &[], None);
+    let at_the_boundary = publisher.publish(&over(600), &[], Some(ms(400)));
+    let after = publisher.publish(&over(800), &[], Some(ms(400)));
+
+    assert_eq!(
+        (at_the_boundary.over_cpu_streak, after.over_cpu_streak),
+        (0, 1)
+    );
+}
+
+#[test]
+fn a_missing_pressure_reading_counts_toward_no_quiet_or_cpu_streak() {
+    let mut publisher = Publisher::new(&machine());
+    publisher.publish(&Sample::at(ms(200)), &[], None);
+
+    let quiet_but_unread = publisher.publish(
+        &Sample::at(ms(400)).missing(Reading::CpuPressure),
+        &[],
+        None,
+    );
+    let over_but_unread = publisher.publish(
+        &Sample::at(ms(600))
+            .background(40_000, 0)
+            .missing(Reading::CpuPressure),
+        &[],
+        None,
+    );
+
+    assert_eq!(quiet_but_unread.quiet_streak, 0);
+    assert_eq!(over_but_unread.over_cpu_streak, 0);
+}
+
+#[test]
+fn a_missing_gpu_reading_counts_toward_no_gpu_streak() {
+    let mut publisher = Publisher::new(&machine());
+    publisher.publish(&Sample::at(ms(200)).gpu(990), &[], None);
+
+    let unread = publisher.publish(
+        &Sample::at(ms(400)).gpu(990).missing(Reading::Gpu),
+        &[],
+        None,
+    );
+
+    assert_eq!(unread.over_gpu_streak, 0);
+}

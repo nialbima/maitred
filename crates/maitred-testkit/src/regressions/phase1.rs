@@ -5,8 +5,8 @@
 //! 1 s stall limit. Each scenario's comment works its numbers from "Inside `decide`" (ARCHITECTURE.md).
 
 use maitred_scenario::{
-    Class, ClassCase, Expect, Fault, Hook, Job, MachineConfig, Matched, Process, Reading, Sample,
-    Scenario, Signal, Trigger, ms, secs,
+    Class, ClassCase, Expect, Fault, Hook, Job, MachineConfig, MatchExpect, Process, Reading,
+    Sample, Scenario, Signal, Trigger, ms, secs,
 };
 
 /// The admission scenarios of phase 1.
@@ -100,12 +100,11 @@ fn missing_memory_reading_falls_back_to_one_at_a_time() -> Scenario {
     .expect(Expect::never_together("a", "b"))
 }
 
-/// `a` reserves 15000 MB, but outside load holds 2000, so at most 14384 MB is ever available and `a` can
-/// never fit. After its aging (3 s) and aging hold (3 s more), its hold lapses. `b`, a small job behind it,
-/// must still start: a job that can never fit mustn't hold the queue for ever.
-///
-/// A ticket drains the machine only if it "fits once drained" (ARCHITECTURE rev 111, Nick's decision on MT-019):
-/// at most 14384 MB plus what living charged tickets hold, short of 15000, so `a` waits without stopping the walk.
+/// `a` reserves 15000 MB, but outside load holds 2000, so at most 14384 MB is ever available and `a` can never
+/// fit. It ages at 3 s and holds its 15000 MB out of free until its hold lapses at 6 s, so `c`, arriving at 4 s,
+/// waits until then. After the lapse, `a` drains the machine only if it "fits once drained" (ARCHITECTURE
+/// rev 111, Nick's decision on MT-019): at most 14384 MB, short of 15000. So it doesn't stop the walk, and `b`,
+/// arriving at 7 s, starts at once. With the drain applied regardless of fit, `b` would wait for ever.
 fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
     Scenario::new(
         "a job that can never fit doesn't keep the jobs behind it out for ever",
@@ -114,31 +113,40 @@ fn job_that_can_never_fit_doesnt_hold_the_queue_for_ever() -> Scenario {
     .checks("r3-admission A17")
     .load(Sample::at(ms(0)).background(0, 2_000))
     .arrive(ms(0), Job::new("a", Class::Light).reserves(1_000, 15_000))
-    .arrive(ms(500), Job::new("b", Class::Light))
-    .expect(Expect::admitted("b"))
+    .arrive(ms(4_000), Job::new("c", Class::Light))
+    .arrive(ms(7_000), Job::new("b", Class::Light))
+    .expect(Expect::not_admitted_before("c", secs(6)))
+    .expect(Expect::admitted_by("c", secs(7)))
+    .expect(Expect::admitted_by("b", secs(8)))
+    .expect(Expect::never_admitted("a"))
+    .run_until(secs(10))
 }
 
-/// Three heavy jobs, each reserving 2000 millicores, so their budget (6000) fits 8 cores. Only the class limit,
-/// `max_running.heavy` = 2, keeps the third out. Settle (600 ms) spaces the first two. The limit counts jobs
-/// "charged or admitted on paper", so no pass admits a third beside two, and order follows arrival.
+/// Settle is 0 here, so it can't hide the class limit. `x1` and `x2` (heavy) fill `max_running.heavy` = 2; `x1`
+/// ends at 2 s and `x2` runs on. `h1` and `h2` wait behind them on the limit. When `x1` ends, one slot is free:
+/// whichever of `h1` and `h2` runs its pass first, the walk admits `h1` on paper, and the limit "charged or
+/// admitted on paper" then counts `x2` and `h1`, so `h2` waits. Counting only the running jobs would let `h2` in
+/// too, three at once. Each reserves 2000 millicores, so the budget (8000) never decides it.
 fn heavy_limit_counts_admissions_on_paper() -> Scenario {
-    let heavy = |label| {
+    let mut machine = MachineConfig::for_tests();
+    machine.settle = ms(0);
+    let heavy = |label, run_for| {
         Job::new(label, Class::Heavy)
             .reserves(2_000, 1_024)
-            .runs_for(secs(3))
+            .runs_for(run_for)
     };
     Scenario::new(
         "no more heavy jobs run than the class allows, in queue order",
-        MachineConfig::for_tests(),
+        machine,
     )
     .checks("r2-admission A6")
-    .arrive(ms(0), heavy("h1"))
-    .arrive(ms(300), heavy("h2"))
-    .arrive(ms(600), heavy("h3"))
-    .expect(Expect::at_most_together(2, &["h1", "h2", "h3"]))
+    .arrive(ms(0), heavy("x1", secs(2)))
+    .arrive(ms(200), heavy("x2", secs(10)))
+    .arrive(ms(500), heavy("h1", secs(3)))
+    .arrive(ms(800), heavy("h2", secs(3)))
+    .expect(Expect::at_most_together(2, &["x1", "x2", "h1", "h2"]))
     .expect(Expect::admitted_before("h1", "h2"))
-    .expect(Expect::admitted_before("h2", "h3"))
-    .expect(Expect::admitted("h3"))
+    .expect(Expect::admitted("h2"))
 }
 
 /// `h1` and `h2` (heavy, 2000 millicores each, using 100) run for 6 s; `h3` waits on `max_running.heavy` and
@@ -200,10 +208,12 @@ fn quiet_job_waits_for_a_quiet_machine_without_holding_up_others() -> Scenario {
     .expect(Expect::admitted("q"))
 }
 
-/// Small light jobs, each reserving 4000 MB and using 64, arrive every 500 ms and run for 2 s, so about four run
-/// at once and free memory stays near 16384 - 4 x 64 - 4 x 3936 = 384 MB. `big` (8000 MB) never fits on its own.
-/// Once it has waited past `aging` (3 s), it holds its 8000 MB out of free, so the small ones fill only around
-/// it, and it starts as soon as the memory it holds is really free, within a couple of small jobs' lifetimes.
+/// Small light jobs, each reserving 4000 MB and using 64, arrive every 500 ms from 0 to 11.5 s and run for 2 s,
+/// so four run at once. Each is charged 4000 - 64 = 3936 MB. `big` (8000 MB) arrives at 1.1 s, with three
+/// running: free is 16384 - 3 x 64 - 3 x 3936 = 4384, so it doesn't fit, and it never fits on its own while the
+/// arrivals go on (at most 4320 is free between them). Once aged (4.1 s), it holds its 8000 MB out of free, so
+/// the small ones fill only around it and it starts as their memory comes free, by 8 s. Without the hold, it
+/// waits until the arrivals stop, after 12 s.
 fn large_light_job_gets_in_under_steady_small_arrivals() -> Scenario {
     let mut scenario = Scenario::new(
         "a large job gets in while small ones keep arriving",
@@ -211,10 +221,10 @@ fn large_light_job_gets_in_under_steady_small_arrivals() -> Scenario {
     )
     .checks("r2-admission A5")
     .arrive(
-        ms(100),
+        ms(1_100),
         Job::new("big", Class::Light).reserves(1_000, 8_000),
     );
-    for i in 0..12_u64 {
+    for i in 0..24_u64 {
         let label = format!("s{i}");
         scenario = scenario.arrive(
             ms(500 * i),
@@ -223,7 +233,9 @@ fn large_light_job_gets_in_under_steady_small_arrivals() -> Scenario {
                 .runs_for(secs(2)),
         );
     }
-    scenario.expect(Expect::admitted_by("big", secs(7)))
+    scenario
+        .expect(Expect::not_admitted_before("big", ms(4_100)))
+        .expect(Expect::admitted_by("big", secs(8)))
 }
 
 /// `h` (heavy, reserving 2048 MB, using 1000) and `l` (light, reserving 1000 MB, using 1100) run. At 3 s, outside
@@ -257,16 +269,19 @@ fn memory_breach_kills_the_job_furthest_over_and_only_one() -> Scenario {
     .expect(Expect::at_most_kills(Trigger::Memory, 1))
 }
 
-/// `o` runs for a long time and its supervisor is killed, leaving a running orphan whose holder is alive. `q`, a
-/// quiet job, becomes due after `quiet_max_wait` (5 s) and the machine drains for it. A quiet job is allowed when
-/// "no living ticket [is] charged", and an orphan isn't living, so `q` gets in while `o` still runs, rather than
-/// waiting for the orphan to end.
+/// Outside load demands 4000 millicores, half a runnable task per core, over the quiet threshold, so the quiet
+/// streak stays 0 and `q` isn't allowed until it is due, after `quiet_max_wait` (5 s, so at 6 s). `o` runs for a
+/// long time and its supervisor is killed, leaving a running orphan whose holder is alive. When `q` is due, the
+/// machine drains for it, and a quiet job is allowed when "no living ticket [is] charged". An orphan isn't living,
+/// so `q` gets in at once rather than when the orphan ends. `l`, queued behind `q` while it drains, then runs once
+/// `q` (1 s) has finished, instead of waiting out the orphan too.
 fn due_quiet_job_isnt_held_off_by_an_orphan() -> Scenario {
     Scenario::new(
         "a due quiet job isn't held off by an orphan that never ends",
         MachineConfig::for_tests(),
     )
     .checks("r3-admission A16")
+    .load(Sample::at(ms(0)).background(4_000, 0))
     .arrive(
         ms(0),
         Job::new("o", Class::Light).uses(500, 64).runs_for(secs(60)),
@@ -275,14 +290,20 @@ fn due_quiet_job_isnt_held_off_by_an_orphan() -> Scenario {
         ms(500),
         Fault::signal("o", Process::Supervisor, Signal::Kill),
     )
-    .arrive(ms(1_000), Job::new("q", Class::Quiet))
-    .expect(Expect::admitted_by("q", secs(8)))
+    .arrive(ms(1_000), Job::new("q", Class::Quiet).runs_for(secs(1)))
+    .arrive(ms(6_200), Job::new("l", Class::Light))
+    .expect(Expect::not_admitted_before("q", secs(6)))
+    .expect(Expect::admitted_by("q", secs(7)))
+    .expect(Expect::admitted_before("q", "l"))
+    .expect(Expect::admitted_by("l", secs(9)))
 }
 
-/// `x` holds 15000 MB, so `w1` and `w2` (8000 MB each) wait behind it, in that order. The machine sleeps from
-/// 1.5 s to 9.5 s, longer than the stall limit (1 s), and `x` ends 0.5 s after waking. On waking, every waiter's
-/// last pass is 8 s old, but "nobody is judged stalled ... until the stall limit has passed since the machine
-/// last woke", so whichever supervisor runs its first pass after waking, `w1` still starts before `w2`.
+/// Outside load holds 8000 MB, so only 8384 is free and neither `w1` nor `w2` (9000 MB each) fits; first-in never
+/// waives memory. The machine sleeps from 1.5 s to 9.5 s, longer than the stall limit (1 s), and the outside load
+/// is gone when it wakes, so there is room for exactly one of them at the moment of waking: 16384 - 9000 = 7384 is
+/// left for the other. Every waiter's last pass is then 8 s old, but "nobody is judged stalled ... until the stall
+/// limit has passed since the machine last woke", so whichever supervisor runs its first pass after waking, `w1`
+/// gets the room and `w2` waits for it.
 fn nobody_jumps_the_queue_after_the_machine_wakes() -> Scenario {
     Scenario::new(
         "after the machine wakes, no waiter is skipped as stalled",
@@ -290,19 +311,18 @@ fn nobody_jumps_the_queue_after_the_machine_wakes() -> Scenario {
     )
     .checks("r2-concurrency B7")
     .checks("r3-admission A14")
+    .load(Sample::at(ms(0)).background(0, 8_000))
+    .load(Sample::at(ms(9_500)))
     .arrive(
         ms(0),
-        Job::new("x", Class::Light)
-            .reserves(1_000, 15_000)
-            .runs_for(secs(2)),
+        Job::new("w1", Class::Light)
+            .reserves(1_000, 9_000)
+            .runs_for(secs(1)),
     )
-    .arrive(ms(500), Job::new("w1", Class::Light).reserves(1_000, 8_000))
-    .arrive(
-        ms(1_000),
-        Job::new("w2", Class::Light).reserves(1_000, 8_000),
-    )
+    .arrive(ms(500), Job::new("w2", Class::Light).reserves(1_000, 9_000))
     .sleep(ms(1_500), ms(9_500))
     .expect(Expect::admitted_before("w1", "w2"))
+    .expect(Expect::never_together("w1", "w2"))
 }
 
 /// `h1` and `h2` (heavy) run for 12 s, so `h3` waits on `max_running.heavy` past `aging` and `aging_hold` (its hold
@@ -466,25 +486,29 @@ pub fn classification() -> Vec<ClassCase> {
         // Matching strips launchers the machine config lists, such as bundle exec, then matches the rule.
         argv("specs behind bundle exec", &["bundle", "exec", "bin/rspec"])
             .checks("r2-threat B3")
-            .expect_match(Matched::queued(Class::Light).rule("specs").slot("test_env")),
+            .expect_match(
+                MatchExpect::queued(Class::Light)
+                    .rule("specs")
+                    .slot("test_env"),
+            ),
         // Matching strips wrappers "repeatedly: leading NAME=value assignments, then wrappers".
         argv(
             "a heavy program behind env and nice",
             &["env", "FOO=1", "nice", "-n", "5", "bin/mutant", "run"],
         )
         .checks("r3-threat T10")
-        .expect_match(Matched::queued(Class::Heavy).rule("mutation")),
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
         // Keep-awake wrappers refuse the job only "as the program after stripping; the word as an argument
         // (rg caffeinate) does not". rg matches no rule, so it is heavy.
         argv("a keep-awake word as an argument", &["rg", "caffeinate"])
             .checks("r2-threat A14")
-            .expect_match(Matched::queued(Class::Heavy)),
+            .expect_match(MatchExpect::queued(Class::Heavy).no_rule()),
         argv(
             "a keep-awake wrapper as the program",
             &["caffeinate", "-i", "bin/mutant", "run"],
         )
         .checks("r2-threat A14")
-        .expect_match(Matched::Refused),
+        .expect_match(MatchExpect::refused()),
         // A shell string "takes the strictest class among the programs it finds, every slot any of them asks
         // for, and their largest reservation". Programs no rule names add nothing.
         argv(
@@ -493,13 +517,13 @@ pub fn classification() -> Vec<ClassCase> {
         )
         .checks("r3-threat T12")
         .checks("r4-classify C14")
-        .expect_match(Matched::queued(Class::Heavy).slot("test_env")),
+        .expect_match(MatchExpect::queued(Class::Heavy).slot("test_env")),
         argv(
             "a light program piped into an ordinary helper",
             &["sh", "-c", "bin/rspec | tail -40"],
         )
         .checks("r4-classify C1")
-        .expect_match(Matched::queued(Class::Light).slot("test_env")),
+        .expect_match(MatchExpect::queued(Class::Light).slot("test_env")),
         // "An invalid file ... makes every command heavy, with a warning naming the bad line." This rule has no
         // why, which makes the file invalid.
         ClassCase::argv(
@@ -508,7 +532,7 @@ pub fn classification() -> Vec<ClassCase> {
             &["bin/rspec"],
         )
         .checks("r2-threat A9")
-        .expect_match(Matched::queued(Class::Heavy)),
+        .expect_match(MatchExpect::queued(Class::Heavy).no_rule()),
         // "A rule asking for a pool this machine doesn't declare is skipped with a warning instead": only that
         // rule. With no pool declared, specs is skipped and bin/rspec matches nothing, so it is heavy, while
         // mutation still matches.
@@ -518,13 +542,13 @@ pub fn classification() -> Vec<ClassCase> {
             &["bin/mutant", "run"],
         )
         .checks("r4-classify C8")
-        .expect_match(Matched::queued(Class::Heavy).rule("mutation")),
+        .expect_match(MatchExpect::queued(Class::Heavy).rule("mutation")),
         ClassCase::argv(
             "the skipped rule's program falls to heavy",
             CLASSES,
             &["bin/rspec"],
         )
         .checks("r4-classify C8")
-        .expect_match(Matched::queued(Class::Heavy)),
+        .expect_match(MatchExpect::queued(Class::Heavy).no_rule()),
     ]
 }

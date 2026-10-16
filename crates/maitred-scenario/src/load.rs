@@ -20,7 +20,8 @@ pub enum Reading {
 /// The background load at the end of one sample interval.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sample {
-    /// When the sample was taken; its interval is the sample interval before this.
+    /// When the sample was taken; its interval runs from the previous sample (or one sample interval before, for
+    /// the first).
     pub at: Ms,
     /// CPU demand from outside maitred, in millicores. Demand past capacity shows as pressure.
     pub cpu_demand_millicores: u32,
@@ -86,15 +87,25 @@ pub struct Running<'a> {
     /// Whether its holder's figure reaches the sample. An unmeasured job counts in the machine's figures but
     /// isn't listed under `jobs`, so admission charges it its whole reservation.
     pub measured: bool,
+    /// Its running threads, summed into `maitred_running_threads` when it is measured.
+    pub threads: u32,
 }
 
 impl<'a> Running<'a> {
+    /// Sets its running threads.
+    #[must_use]
+    pub fn threads(mut self, threads: u32) -> Self {
+        self.threads = threads;
+        self
+    }
+
     #[must_use]
     pub fn measured(label: &'a str, uses: Amount) -> Self {
         Self {
             label,
             uses,
             measured: true,
+            threads: uses.cpu_millicores.div_ceil(1_000),
         }
     }
 
@@ -104,6 +115,7 @@ impl<'a> Running<'a> {
             label,
             uses,
             measured: false,
+            threads: uses.cpu_millicores.div_ceil(1_000),
         }
     }
 }
@@ -121,6 +133,8 @@ pub struct Published {
     pub cpu_pressure_permille: u32,
     pub mem_available_mb: u32,
     pub gpu_permille: Option<u32>,
+    /// maitred's own running threads: the measured jobs' threads, summed (macOS's CPU kill reads it).
+    pub maitred_running_threads: u32,
     pub quiet_streak: u32,
     pub over_cpu_streak: u32,
     pub over_gpu_streak: u32,
@@ -138,6 +152,8 @@ pub struct Publisher {
     cpu_kill_ceiling: u32,
     gpu_kill_ceiling: u32,
     woke_at: Option<Ms>,
+    /// When the previous sample was taken, where this sample's interval begins.
+    previous: Option<Ms>,
     quiet_streak: u32,
     over_cpu_streak: u32,
     over_gpu_streak: u32,
@@ -153,6 +169,7 @@ impl Publisher {
             cpu_kill_ceiling: machine.cpu_kill_ceiling_permille,
             gpu_kill_ceiling: machine.gpu_kill_ceiling_permille,
             woke_at: None,
+            previous: None,
             quiet_streak: 0,
             over_cpu_streak: 0,
             over_gpu_streak: 0,
@@ -162,7 +179,13 @@ impl Publisher {
     /// The load file after `sample`, with `running` jobs using what they declare.
     ///
     /// `victim_gone` is when the last kill's victim was gone, if there has been one: a kill streak counts
-    /// only samples whose interval began after it (ARCHITECTURE.md, Kill policy step 1).
+    /// only samples whose interval began after it (ARCHITECTURE.md, Kill policy step 1). The target running the
+    /// scenario supplies it: the simulator from its own model, the real-process runner from when the victim's
+    /// session emptied.
+    ///
+    /// A missing CPU-pressure reading counts toward neither the quiet streak nor the CPU-kill streak, and a
+    /// missing GPU reading toward no GPU streak: with no figure there is no CPU limit, no CPU kill and no GPU
+    /// kill (ARCHITECTURE.md, Critical readings).
     pub fn publish(
         &mut self,
         sample: &Sample,
@@ -177,27 +200,33 @@ impl Publisher {
         if woke {
             self.woke_at = sample.woke_at;
         }
-        let began = sample.at - self.interval;
-        let counts_for_kill = !woke && victim_gone.is_none_or(|gone| began >= gone);
+        let began = self.previous.unwrap_or(sample.at - self.interval);
+        self.previous = Some(sample.at);
+        let counts_for_kill = !woke && victim_gone.is_none_or(|gone| began > gone);
+        let pressure_read = !sample.missing.contains(&Reading::CpuPressure);
+        let gpu_read = !sample.missing.contains(&Reading::Gpu);
 
-        self.quiet_streak = if woke || pressure >= self.quiet_threshold {
+        self.quiet_streak = if woke || !pressure_read || pressure >= self.quiet_threshold {
             0
         } else {
             self.quiet_streak + 1
         };
-        self.over_cpu_streak = if counts_for_kill && pressure > self.cpu_kill_ceiling {
-            self.over_cpu_streak + 1
-        } else {
-            0
-        };
+        self.over_cpu_streak =
+            if counts_for_kill && pressure_read && pressure > self.cpu_kill_ceiling {
+                self.over_cpu_streak + 1
+            } else {
+                0
+            };
         self.over_gpu_streak = match sample.gpu_permille {
-            Some(gpu) if counts_for_kill && gpu > self.gpu_kill_ceiling => self.over_gpu_streak + 1,
+            Some(gpu) if counts_for_kill && gpu_read && gpu > self.gpu_kill_ceiling => {
+                self.over_gpu_streak + 1
+            }
             _ => 0,
         };
 
         Published {
             sampled_at: sample.at,
-            interval: self.interval,
+            interval: sample.at - began,
             fresh: !woke,
             woke_at: self.woke_at,
             capacity: self.capacity,
@@ -208,6 +237,11 @@ impl Publisher {
                 .mem_mb
                 .saturating_sub(sample.mem_used_mb + job_mem),
             gpu_permille: sample.gpu_permille,
+            maitred_running_threads: running
+                .iter()
+                .filter(|job| job.measured)
+                .map(|job| job.threads)
+                .sum(),
             quiet_streak: self.quiet_streak,
             over_cpu_streak: self.over_cpu_streak,
             over_gpu_streak: self.over_gpu_streak,

@@ -40,20 +40,24 @@ fn the_checksum_is_ieee_crc_32() {
 
 #[test]
 fn a_slot_built_byte_by_byte_from_the_doc_decodes_to_its_fields() {
+    // Every field gets a distinct non-zero value, so two fields swapped in the reader can't both read right.
     let payload = br#"{"v":"4.0"}"#;
     let mut slot = [0_u8; SLOT];
     slot[0..8].copy_from_slice(b"MTRDTICK");
     slot[12..16].copy_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
     slot[16..24].copy_from_slice(&7_u64.to_le_bytes());
     slot[24] = 4;
-    slot[25] = 0;
+    slot[25] = 3;
     slot[26] = 2;
     slot[27] = 1;
     slot[28..32].copy_from_slice(&500_u32.to_le_bytes());
     slot[32..36].copy_from_slice(&256_u32.to_le_bytes());
     slot[36..40].copy_from_slice(&(-1_i32).to_le_bytes());
     slot[40..48].copy_from_slice(&99_u64.to_le_bytes());
-    slot[48..56].copy_from_slice(&1_000_u64.to_le_bytes());
+    slot[48..56].copy_from_slice(&1_001_u64.to_le_bytes());
+    slot[56..64].copy_from_slice(&1_002_u64.to_le_bytes());
+    slot[64..72].copy_from_slice(&1_003_u64.to_le_bytes());
+    slot[72..80].copy_from_slice(&1_004_u64.to_le_bytes());
     slot[80..84].copy_from_slice(&(-2_i32).to_le_bytes());
     slot[84..88].copy_from_slice(&(-3_i32).to_le_bytes());
     slot[88..96].copy_from_slice(&42_u64.to_le_bytes());
@@ -64,27 +68,27 @@ fn a_slot_built_byte_by_byte_from_the_doc_decodes_to_its_fields() {
     let (header, body) = decode_slot(&slot).expect("a well-formed slot");
 
     assert_eq!(
-        (
-            header.generation,
-            header.class,
-            header.state,
-            header.cpu_millicores,
-            header.mem_mb
-        ),
-        (7, 2, 1, 500, 256)
+        header,
+        Header {
+            generation: 7,
+            major: 4,
+            minor: 3,
+            class: 2,
+            state: 1,
+            cpu_millicores: 500,
+            mem_mb: 256,
+            sid: -1,
+            seq: 99,
+            last_pass: 1_001,
+            admitted_at: 1_002,
+            recreated_at: 1_003,
+            holder_start: 1_004,
+            pgid: -2,
+            holder_pid: -3,
+            boot: 42,
+        }
     );
-    assert_eq!(
-        (
-            header.sid,
-            header.seq,
-            header.last_pass,
-            header.pgid,
-            header.holder_pid
-        ),
-        (-1, 99, 1_000, -2, -3)
-    );
-    assert_eq!(header.boot, 42);
-    assert_eq!(body, r#"{"v":"4.0"}"#);
+    assert_eq!(body, payload.to_vec());
 }
 
 #[test]
@@ -93,7 +97,7 @@ fn encoding_then_decoding_gives_back_the_same_slot() {
 
     assert_eq!(
         decode_slot(&slot),
-        Ok((header(9), r#"{"label":"a"}"#.to_string()))
+        Ok((header(9), br#"{"label":"a"}"#.to_vec()))
     );
 }
 
@@ -222,5 +226,88 @@ fn an_unknown_class_code_reads_as_heavy() {
         }
         .class(),
         maitred_scenario::Class::Quiet
+    );
+}
+
+#[test]
+fn a_payload_that_isnt_utf_8_doesnt_fail_a_slot_whose_checksum_passes() {
+    let mut newer = encode_slot(&header(6), r#"{"v":"4.0"}"#);
+    newer[96] = 0xFF;
+    let crc = crc32(&newer[12..96 + r#"{"v":"4.0"}"#.len()]);
+    newer[8..12].copy_from_slice(&crc.to_le_bytes());
+    let older = encode_slot(&header(5), "{}");
+
+    let read = read_ticket(&file(&older, &newer));
+
+    assert_eq!(read.generation(), Some(6));
+    assert_eq!(read.payload(), None);
+}
+
+#[test]
+fn with_two_valid_slots_of_one_generation_the_second_is_read() {
+    let first = encode_slot(&header(3), r#"{"slot":1}"#);
+    let second = encode_slot(&header(3), r#"{"slot":2}"#);
+
+    assert_eq!(
+        read_ticket(&file(&first, &second)).payload(),
+        Some(r#"{"slot":2}"#)
+    );
+}
+
+#[test]
+fn each_known_code_reads_as_itself_and_says_it_is_known() {
+    assert_eq!(
+        Header {
+            class: 0,
+            ..header(1)
+        }
+        .class(),
+        maitred_scenario::Class::Light
+    );
+    assert_eq!(
+        Header {
+            class: 1,
+            ..header(1)
+        }
+        .class(),
+        maitred_scenario::Class::Heavy
+    );
+    assert_eq!(
+        Header {
+            state: 1,
+            ..header(1)
+        }
+        .state(),
+        StateCode::Admitted
+    );
+    assert_eq!(
+        Header {
+            state: 2,
+            ..header(1)
+        }
+        .state(),
+        StateCode::Running
+    );
+    assert!(
+        Header {
+            class: 2,
+            state: 2,
+            ..header(1)
+        }
+        .codes_known()
+    );
+    assert!(
+        !Header {
+            state: 3,
+            ..header(1)
+        }
+        .codes_known()
+    );
+    assert!(
+        !Header {
+            class: 3,
+            ..header(1)
+        }
+        .codes_known()
     );
 }

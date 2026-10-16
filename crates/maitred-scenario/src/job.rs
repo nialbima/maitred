@@ -29,6 +29,9 @@ pub struct Job {
     pub exit_status: u8,
     /// Whether its holder's measurement reaches the sample (see [`crate::Running`]).
     pub measured: bool,
+    /// Its running threads, as its holder counts them into `maitred_running_threads` on macOS; `None` means its
+    /// CPU use in whole cores, rounded up.
+    pub running_threads: Option<u32>,
 }
 
 impl Job {
@@ -47,6 +50,7 @@ impl Job {
             runs_for: secs(1),
             exit_status: 0,
             measured: true,
+            running_threads: None,
         }
     }
 
@@ -89,6 +93,20 @@ impl Job {
     pub fn unmeasured(mut self) -> Self {
         self.measured = false;
         self
+    }
+
+    /// Sets its running threads.
+    #[must_use]
+    pub fn with_threads(mut self, threads: u32) -> Self {
+        self.running_threads = Some(threads);
+        self
+    }
+
+    /// Its running threads: as set, or its CPU use in whole cores, rounded up.
+    #[must_use]
+    pub fn threads(&self) -> u32 {
+        self.running_threads
+            .unwrap_or_else(|| self.uses.cpu_millicores.div_ceil(1_000))
     }
 
     /// Sets the status it exits with.

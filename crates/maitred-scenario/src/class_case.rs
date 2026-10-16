@@ -42,8 +42,7 @@ impl Hook {
 /// What argv matching makes of a command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Matched {
-    /// Queued in `class`, under `rule`, with these slots and record flags. As an expectation, `rule: None`
-    /// accepts any rule; see [`ClassCase::judge_match`].
+    /// Queued in `class`, under `rule` (`None` when no rule matched), with these slots and record flags.
     Queued {
         class: Class,
         rule: Option<String>,
@@ -108,11 +107,172 @@ impl Matched {
     }
 }
 
+/// Which rule a case expects to match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleExpect {
+    /// Any rule, or none: for strings of several programs, where the doc doesn't fix which rule is reported.
+    Any,
+    /// No rule matched.
+    None,
+    /// This rule.
+    Named(String),
+}
+
+/// What a case expects argv matching to answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatchExpect {
+    /// Queued in `class`, under `rule`, with exactly these slots (in any order), at least the `flags` and none of
+    /// the `without_flags`.
+    Queued {
+        class: Class,
+        rule: RuleExpect,
+        slots: Vec<String>,
+        flags: Vec<String>,
+        without_flags: Vec<String>,
+    },
+    Refused,
+}
+
+impl MatchExpect {
+    /// Queued in `class`, under any rule, with no slots.
+    #[must_use]
+    pub fn queued(class: Class) -> Self {
+        Self::Queued {
+            class,
+            rule: RuleExpect::Any,
+            slots: Vec::new(),
+            flags: Vec::new(),
+            without_flags: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn refused() -> Self {
+        Self::Refused
+    }
+
+    fn queued_mut(
+        &mut self,
+    ) -> (
+        &mut RuleExpect,
+        &mut Vec<String>,
+        &mut Vec<String>,
+        &mut Vec<String>,
+    ) {
+        let Self::Queued {
+            rule,
+            slots,
+            flags,
+            without_flags,
+            ..
+        } = self
+        else {
+            panic!("a refusal has no rule, slots or flags")
+        };
+        (rule, slots, flags, without_flags)
+    }
+
+    /// Expects this rule.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn rule(mut self, name: &str) -> Self {
+        *self.queued_mut().0 = RuleExpect::Named(name.into());
+        self
+    }
+
+    /// Expects that no rule matched.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn no_rule(mut self) -> Self {
+        *self.queued_mut().0 = RuleExpect::None;
+        self
+    }
+
+    /// Expects a slot from `pool`.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn slot(mut self, pool: &str) -> Self {
+        self.queued_mut().1.push(pool.into());
+        self
+    }
+
+    /// Expects this record flag.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn flag(mut self, flag: &str) -> Self {
+        self.queued_mut().2.push(flag.into());
+        self
+    }
+
+    /// Expects this record flag to be absent.
+    ///
+    /// # Panics
+    ///
+    /// On a refusal.
+    #[must_use]
+    pub fn without_flag(mut self, flag: &str) -> Self {
+        self.queued_mut().3.push(flag.into());
+        self
+    }
+
+    /// Whether `actual` is an answer this expectation accepts.
+    fn allows(&self, actual: &Matched) -> bool {
+        match (self, actual) {
+            (Self::Refused, Matched::Refused) => true,
+            (
+                Self::Queued {
+                    class,
+                    rule,
+                    slots,
+                    flags,
+                    without_flags,
+                },
+                Matched::Queued {
+                    class: actual_class,
+                    rule: actual_rule,
+                    slots: actual_slots,
+                    flags: actual_flags,
+                },
+            ) => {
+                let rule_ok = match rule {
+                    RuleExpect::Any => true,
+                    RuleExpect::None => actual_rule.is_none(),
+                    RuleExpect::Named(name) => actual_rule.as_ref() == Some(name),
+                };
+                let mut expected_slots = slots.clone();
+                let mut got_slots = actual_slots.clone();
+                expected_slots.sort();
+                got_slots.sort();
+                class == actual_class
+                    && rule_ok
+                    && expected_slots == got_slots
+                    && flags.iter().all(|flag| actual_flags.contains(flag))
+                    && without_flags
+                        .iter()
+                        .all(|flag| !actual_flags.contains(flag))
+            }
+            _ => false,
+        }
+    }
+}
+
 /// The answer a case expects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expected {
     Hook(Hook),
-    Match(Matched),
+    Match(MatchExpect),
 }
 
 /// A reason a case can't be run as written.
@@ -189,7 +349,7 @@ impl ClassCase {
     }
 
     #[must_use]
-    pub fn expect_match(mut self, matched: Matched) -> Self {
+    pub fn expect_match(mut self, matched: MatchExpect) -> Self {
         self.expected = Some(Expected::Match(matched));
         self
     }
@@ -203,8 +363,8 @@ impl ClassCase {
         match (&self.input, &self.expected) {
             (_, None) => Err(InvalidCase::NoExpectation),
             (Input::Shell(_), Some(Expected::Hook(_)))
-            | (Input::Argv(_), Some(Expected::Match(Matched::Refused))) => Ok(()),
-            (Input::Argv(_), Some(Expected::Match(Matched::Queued { slots, .. }))) => {
+            | (Input::Argv(_), Some(Expected::Match(MatchExpect::Refused))) => Ok(()),
+            (Input::Argv(_), Some(Expected::Match(MatchExpect::Queued { slots, .. }))) => {
                 match slots.iter().find(|pool| !self.pools.contains(pool)) {
                     Some(pool) => Err(InvalidCase::UndeclaredPool(pool.clone())),
                     None => Ok(()),
@@ -227,8 +387,8 @@ impl ClassCase {
         }
     }
 
-    /// Compares argv matching's answer with the expected one: the same class and slots, the named rule if the
-    /// case names one, and at least the flags it lists.
+    /// Compares argv matching's answer with the expected one (see [`MatchExpect`]). Call [`ClassCase::validate`]
+    /// first: a case of the wrong kind fails here with a refusal standing in for the expectation.
     ///
     /// # Errors
     ///
@@ -237,44 +397,11 @@ impl ClassCase {
         clippy::result_large_err,
         reason = "the error is the expected and actual answers a failing case reports, built once per case"
     )]
-    pub fn judge_match(&self, actual: &Matched) -> Result<(), (Matched, Matched)> {
+    pub fn judge_match(&self, actual: &Matched) -> Result<(), (MatchExpect, Matched)> {
         match &self.expected {
             Some(Expected::Match(expected)) if expected.allows(actual) => Ok(()),
             Some(Expected::Match(expected)) => Err((expected.clone(), actual.clone())),
-            _ => Err((Matched::Refused, actual.clone())),
-        }
-    }
-}
-
-impl Matched {
-    /// Whether `actual` is the answer this one expects. The class and the slots must be the same. The rule is
-    /// compared only when this names one, and `actual` may carry flags beyond the ones this lists: the doc
-    /// doesn't fix which rule a string of several programs reports, or every flag's name.
-    fn allows(&self, actual: &Matched) -> bool {
-        match (self, actual) {
-            (Matched::Refused, Matched::Refused) => true,
-            (
-                Matched::Queued {
-                    class,
-                    rule,
-                    slots,
-                    flags,
-                },
-                Matched::Queued {
-                    class: actual_class,
-                    rule: actual_rule,
-                    slots: actual_slots,
-                    flags: actual_flags,
-                },
-            ) => {
-                class == actual_class
-                    && rule
-                        .as_ref()
-                        .is_none_or(|name| actual_rule.as_ref() == Some(name))
-                    && slots == actual_slots
-                    && flags.iter().all(|flag| actual_flags.contains(flag))
-            }
-            _ => false,
+            _ => Err((MatchExpect::Refused, actual.clone())),
         }
     }
 }

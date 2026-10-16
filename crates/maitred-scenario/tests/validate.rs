@@ -1,6 +1,6 @@
 //! A scenario that can't be run as written is refused before either target sees it.
 
-use maitred_scenario::{Class, Expect, Fault, Invalid, Job, MachineConfig, Scenario, ms};
+use maitred_scenario::{Class, Expect, Fault, Invalid, Job, MachineConfig, Scenario, ms, secs};
 
 fn machine() -> MachineConfig {
     MachineConfig::for_tests()
@@ -159,6 +159,77 @@ fn a_machine_sleep_that_ends_before_it_starts_is_refused() {
         Err(vec![Invalid::SleepEndsBeforeItStarts {
             at: ms(9_000),
             wakes_at: ms(1_000)
+        }])
+    );
+}
+
+#[test]
+fn a_jobs_threads_default_to_its_cpu_in_whole_cores_rounded_up() {
+    assert_eq!(Job::new("a", Class::Light).uses(2_500, 0).threads(), 3);
+    assert_eq!(Job::new("b", Class::Light).uses(2_000, 0).threads(), 2);
+    assert_eq!(Job::new("c", Class::Light).uses(100, 0).threads(), 1);
+    assert_eq!(Job::new("d", Class::Light).uses(0, 0).threads(), 0);
+    assert_eq!(
+        Job::new("e", Class::Light)
+            .uses(2_500, 0)
+            .with_threads(8)
+            .threads(),
+        8
+    );
+}
+
+#[test]
+fn an_at_most_together_that_can_never_fail_is_refused() {
+    let scenario = Scenario::new("a bound that can't be broken", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(1_000), Job::new("b", Class::Light))
+        .expect(Expect::at_most_together(2, &["a", "b"]));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::CantFail {
+            allowed: 2,
+            jobs: 2
+        }])
+    );
+}
+
+#[test]
+fn an_at_most_together_naming_one_job_twice_is_refused() {
+    let scenario = Scenario::new("a job listed twice", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(1_000), Job::new("b", Class::Light))
+        .arrive(ms(2_000), Job::new("c", Class::Light))
+        .expect(Expect::at_most_together(1, &["a", "a", "b"]));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::DuplicateLabel("a".into())])
+    );
+}
+
+#[test]
+fn a_run_that_stops_after_its_last_event_is_accepted() {
+    let scenario = Scenario::new("stops in time", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(1_000), Job::new("b", Class::Light))
+        .run_until(secs(10));
+
+    assert_eq!(scenario.validate(), Ok(()));
+}
+
+#[test]
+fn a_run_that_stops_before_its_last_event_is_refused() {
+    let scenario = Scenario::new("stops too soon", machine())
+        .arrive(ms(0), Job::new("a", Class::Light))
+        .arrive(ms(5_000), Job::new("b", Class::Light))
+        .run_until(secs(2));
+
+    assert_eq!(
+        scenario.validate(),
+        Err(vec![Invalid::StopsBeforeLastEvent {
+            until: secs(2),
+            last: ms(5_000)
         }])
     );
 }

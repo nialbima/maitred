@@ -34,6 +34,10 @@ pub enum Invalid {
     BeforeArrival { label: String, at: Ms },
     /// A job asks for a slot from a pool the machine config doesn't declare.
     UndeclaredPool { label: String, pool: String },
+    /// An `at_most_together` allows as many jobs as it names, so it can never fail.
+    CantFail { allowed: usize, jobs: usize },
+    /// The run stops before its last event.
+    StopsBeforeLastEvent { until: Ms, last: Ms },
     /// A sleep wakes no later than it starts.
     SleepEndsBeforeItStarts { at: Ms, wakes_at: Ms },
     /// A strict order is expected between two jobs that arrive less than a poll interval apart, which
@@ -59,6 +63,9 @@ pub struct Scenario {
     /// What happens, in the order it happens.
     pub events: Vec<(Ms, Event)>,
     pub expectations: Vec<Expect>,
+    /// When the run stops. `None` means once every job that started has ended and no event is left. A scenario
+    /// expecting a job never to start needs one, since that job never ends.
+    pub until: Option<Ms>,
 }
 
 impl Scenario {
@@ -72,6 +79,7 @@ impl Scenario {
             trace: Vec::new(),
             events: Vec::new(),
             expectations: Vec::new(),
+            until: None,
         }
     }
 
@@ -100,6 +108,13 @@ impl Scenario {
     #[must_use]
     pub fn arrive(self, at: Ms, job: Job) -> Self {
         self.at(at, Event::Arrive(job))
+    }
+
+    /// Stops the run at `until`.
+    #[must_use]
+    pub fn run_until(mut self, until: Ms) -> Self {
+        self.until = Some(until);
+        self
     }
 
     /// The machine sleeps from `at` until `wakes_at`.
@@ -200,6 +215,27 @@ impl Scenario {
                 });
             }
         }
+        if let (Some(until), Some((last, _))) = (self.until, self.events.last())
+            && until < *last
+        {
+            problems.push(Invalid::StopsBeforeLastEvent { until, last: *last });
+        }
+        for expectation in &self.expectations {
+            if let Expect::AtMostTogether { allowed, labels } = expectation {
+                let mut seen = HashSet::new();
+                for label in labels {
+                    if !seen.insert(label.as_str()) {
+                        problems.push(Invalid::DuplicateLabel(label.clone()));
+                    }
+                }
+                if *allowed >= seen.len() {
+                    problems.push(Invalid::CantFail {
+                        allowed: *allowed,
+                        jobs: seen.len(),
+                    });
+                }
+            }
+        }
         if problems.is_empty() {
             Ok(())
         } else {
@@ -213,11 +249,12 @@ impl Scenario {
     ///
     /// Returns each broken expectation, in the order the scenario states them.
     pub fn judge(&self, outcome: &Outcome) -> Result<(), Vec<Failure>> {
-        let failures: Vec<Failure> = self
+        let mut failures: Vec<Failure> = self
             .expectations
             .iter()
             .filter_map(|expectation| expectation.judge(outcome))
             .collect();
+        failures.splice(0..0, outcome.impossible());
         if failures.is_empty() {
             Ok(())
         } else {

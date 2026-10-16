@@ -15,7 +15,9 @@ mod outcome;
 mod scenario;
 mod time;
 
-pub use class_case::{ClassCase, Expected, Hook, Input, InvalidCase, Matched};
+pub use class_case::{
+    ClassCase, Expected, Hook, Input, InvalidCase, MatchExpect, Matched, RuleExpect,
+};
 pub use expect::{Expect, Failure};
 pub use fault::{Fault, Process, Signal};
 pub use job::{Class, Job};

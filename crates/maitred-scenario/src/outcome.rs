@@ -25,13 +25,13 @@ pub enum End {
     Lost,
 }
 
-/// One run's events, by job label.
+/// One run's events, by job label. Entries are judged by their times, not the order they were reported in.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub admissions: Vec<(String, Ms)>,
     pub kills: Vec<(String, Trigger, Ms)>,
-    /// How each run ended, and when, if the target knows.
-    pub ends: Vec<(String, End, Option<Ms>)>,
+    /// How each run ended, and when.
+    pub ends: Vec<(String, End, Ms)>,
 }
 
 impl Outcome {
@@ -55,31 +55,28 @@ impl Outcome {
         self
     }
 
-    /// Records how `label`'s run ended.
-    #[must_use]
-    pub fn ended(mut self, label: &str, end: End) -> Self {
-        self.ends.push((label.into(), end, None));
-        self
-    }
-
     /// Records how `label`'s run ended, and when.
     #[must_use]
     pub fn ended_at(mut self, label: &str, end: End, at: Ms) -> Self {
-        self.ends.push((label.into(), end, Some(at)));
+        self.ends.push((label.into(), end, at));
         self
     }
 
+    /// When `label` was first admitted.
     pub(crate) fn admitted_at(&self, label: &str) -> Option<Ms> {
         self.admissions
             .iter()
-            .find(|(l, _)| l == label)
+            .filter(|(l, _)| l == label)
             .map(|(_, at)| *at)
+            .min()
     }
 
+    /// How `label`'s run ended, by its earliest end.
     pub(crate) fn end_of(&self, label: &str) -> Option<&End> {
         self.ends
             .iter()
-            .find(|(l, _, _)| l == label)
+            .filter(|(l, _, _)| l == label)
+            .min_by_key(|(_, _, at)| *at)
             .map(|(_, end, _)| end)
     }
 
@@ -90,8 +87,36 @@ impl Outcome {
         let end = self
             .ends
             .iter()
-            .find(|(l, _, _)| l == label)
-            .and_then(|(_, _, at)| *at);
+            .filter(|(l, _, _)| l == label)
+            .map(|(_, _, at)| *at)
+            .min();
         Some((start, end))
+    }
+
+    /// Entries no run can have, whatever the scenario expects: a job admitted or ended twice, or ended before it
+    /// was admitted. ARCHITECTURE has one admission and one record per ticket.
+    pub(crate) fn impossible(&self) -> Vec<crate::expect::Failure> {
+        use crate::expect::Failure;
+        let mut labels: Vec<&str> = self.admissions.iter().map(|(l, _)| l.as_str()).collect();
+        labels.extend(self.ends.iter().map(|(l, _, _)| l.as_str()));
+        labels.sort_unstable();
+        labels.dedup();
+        let mut failures = Vec::new();
+        for label in labels {
+            if self.admissions.iter().filter(|(l, _)| l == label).count() > 1 {
+                failures.push(Failure::AdmittedTwice(label.into()));
+            }
+            if self.ends.iter().filter(|(l, _, _)| l == label).count() > 1 {
+                failures.push(Failure::EndedTwice(label.into()));
+            }
+            if let Some((_, _, ended)) = self.ends.iter().find(|(l, _, _)| l == label)
+                && self
+                    .admitted_at(label)
+                    .is_none_or(|admitted| *ended < admitted)
+            {
+                failures.push(Failure::EndedBeforeAdmitted(label.into()));
+            }
+        }
+        failures
     }
 }

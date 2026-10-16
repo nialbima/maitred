@@ -34,6 +34,12 @@ pub enum Expect {
 /// One expectation that a run broke.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
+    /// The outcome reports one job admitted twice.
+    AdmittedTwice(String),
+    /// The outcome reports one job ended twice.
+    EndedTwice(String),
+    /// The outcome reports a job ending before it was admitted, or without being admitted.
+    EndedBeforeAdmitted(String),
     NotBefore {
         first: String,
         second: String,
