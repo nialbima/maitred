@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod classes;
 mod config;
 mod decide;
 pub mod lifecycle;
