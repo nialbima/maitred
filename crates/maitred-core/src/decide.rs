@@ -167,7 +167,11 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
             return Decision::Wait(held);
         }
         // Draining: nothing new starts, so once nothing living is charged it gets in first.
-        if walk.due_quiet(t) || walk.lapsed(t) {
+        // Only a drain that could let it in: otherwise the walk would stop at it for ever. A lapsed
+        // ticket drains only when its class allows it, since draining frees nothing a class rule
+        // (settle, max_running) is waiting on; a quiet ticket's class rule is the idle machine
+        // the drain makes.
+        if (walk.due_quiet(t) || (walk.lapsed(t) && allowed.is_ok())) && walk.fits_once_drained(t) {
             return Decision::Wait(Reason::DrainingFor(t.id.clone()));
         }
         // An aged ticket that only the budget keeps out holds its place in it.
@@ -246,6 +250,9 @@ struct Walk<'a> {
     /// Free cores and memory; can go below zero once an aged ticket holds its place.
     free_cpu: i128,
     free_mem: i128,
+    /// Free memory once every living job has ended: what is free now plus what each holds (its
+    /// measured use, or its whole reservation when unmeasured). A drain frees no more than this.
+    drained_mem: i128,
     heavy: u32,
     last_heavy: Option<Wall>,
     living_charged: bool,
@@ -262,6 +269,7 @@ impl<'a> Walk<'a> {
             free_cpu: i128::from(load.capacity.cpu_millicores)
                 - i128::from(load.cpu_used_millicores),
             free_mem: i128::from(load.mem_available_mb),
+            drained_mem: i128::from(load.mem_available_mb),
             heavy: 0,
             last_heavy: snap.last_heavy,
             living_charged: snap.unreadable > 0 || charged.iter().any(|t| t.is_living()),
@@ -274,16 +282,15 @@ impl<'a> Walk<'a> {
         }
         for t in charged {
             // Orphans count as using nothing, so they hold their whole reservation.
-            let used = match t.liveness {
-                Liveness::Living => snap
-                    .load
-                    .as_ref()
-                    .and_then(|l| l.jobs.get(&t.id))
-                    .copied()
-                    .unwrap_or_default(),
-                Liveness::Orphaned { .. } => Resources::default(),
+            // A living job's use from the sample, if measured. Orphans count as using nothing.
+            let measured = match t.liveness {
+                Liveness::Living => snap.load.as_ref().and_then(|l| l.jobs.get(&t.id)).copied(),
+                Liveness::Orphaned { .. } => None,
             };
-            walk.take(walk.reserve(t).saturating_sub(used));
+            walk.take(walk.reserve(t).saturating_sub(measured.unwrap_or_default()));
+            if t.is_living() {
+                walk.drained_mem += i128::from(measured.unwrap_or_else(|| walk.reserve(t)).mem_mb);
+            }
             // An orphan's class barrier doesn't apply, so it doesn't count toward max_running.
             if t.is_living() && t.class == Class::Heavy {
                 walk.heavy += 1;
@@ -341,6 +348,10 @@ impl<'a> Walk<'a> {
             return Err(Reason::Budget);
         }
         slots_free(self.snap, t, &self.slots_on_paper)
+    }
+
+    fn fits_once_drained(&self, t: &Ticket) -> bool {
+        i128::from(self.reserve(t).mem_mb) <= self.drained_mem
     }
 
     fn memory_fits(&self, t: &Ticket) -> bool {

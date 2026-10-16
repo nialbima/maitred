@@ -1240,3 +1240,131 @@ fn the_number_just_past_a_pools_range_does_not_use_up_a_slot() {
 
     assert_eq!(decide(&snap, &me()), admitted());
 }
+
+#[test]
+fn a_lapsed_ticket_that_could_not_fit_even_on_a_drained_machine_does_not_stop_the_queue() {
+    // MT-019: 16 GB with 2 GB of outside load; draining can never free 15 GB, so the walk goes on.
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 1_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 15_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, lapsed, mine]);
+    let load = snap.load.as_mut().unwrap();
+    load.mem_available_mb = Some(13_000);
+    load.jobs
+        .insert(TicketId("running".into()), Resources::new(1_000, 1_000));
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_that_would_fit_once_maitreds_jobs_end_drains_the_machine() {
+    // 9 GB free and a running job using 5 GB: 14 GB once drained, so a 12 GB ticket drains.
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 5_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 12_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, lapsed, mine]);
+    let load = snap.load.as_mut().unwrap();
+    load.mem_available_mb = Some(9_000);
+    load.jobs
+        .insert(TicketId("running".into()), Resources::new(1_000, 5_000));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn a_lapsed_ticket_that_would_fit_exactly_once_drained_drains_the_machine() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 5_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 14_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, lapsed, mine]);
+    let load = snap.load.as_mut().unwrap();
+    load.mem_available_mb = Some(9_000);
+    load.jobs
+        .insert(TicketId("running".into()), Resources::new(1_000, 5_000));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn an_unmeasured_running_job_counts_its_reservation_toward_what_a_drain_frees() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 5_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 12_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, lapsed, mine]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(9_000);
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Wait(Reason::DrainingFor(TicketId("lapsed".into())))
+    );
+}
+
+#[test]
+fn an_orphans_memory_does_not_count_toward_what_a_drain_frees() {
+    // A drain waits only for living jobs; an orphan may run on, so its memory isn't freed.
+    let mut orphan = ticket("orphan", 0, Class::Light, State::Running);
+    orphan.liveness = Liveness::Orphaned { this_boot: true };
+    orphan.reservation = Resources::new(1_000, 5_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Light, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 12_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![orphan, lapsed, mine]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(9_000);
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_due_quiet_ticket_that_could_never_fit_does_not_stop_the_queue_either() {
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(1_000, 1_000);
+    let mut quiet = ticket("quiet", 1, Class::Quiet, State::Waiting);
+    quiet.reservation = Resources::new(1_000, 15_000);
+    quiet.waited_ms = 3_600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![running, quiet, mine]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(13_000);
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_its_class_rules_keep_out_does_not_drain_the_machine() {
+    // Held by max_running.heavy, not by the budget: stopping light jobs frees nothing it needs.
+    let mut heavy_running = ticket("heavy-running", 0, Class::Heavy, State::Running);
+    heavy_running.reservation = Resources::new(1_000, 1_000);
+    let mut lapsed = ticket("lapsed", 1, Class::Heavy, State::Waiting);
+    lapsed.reservation = Resources::new(1_000, 1_000);
+    lapsed.waited_ms = 600_000 + 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 1_000);
+    let mut snap = snapshot(vec![heavy_running, lapsed, mine]);
+    snap.config.max_running_heavy = 1;
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
