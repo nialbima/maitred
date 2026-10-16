@@ -23,7 +23,11 @@ fn published(sample: &Sample) -> maitred_scenario::Published {
         cpu_millicores: 1_850,
         mem_mb: 760,
     };
-    publisher.publish(sample, &[Running::measured("a", a)], None)
+    publisher.publish(
+        sample,
+        &[Running::measured("a", a).holder_passed(sample.at - ms(100))],
+        None,
+    )
 }
 
 #[test]
@@ -50,6 +54,7 @@ fn a_linux_load_file_has_every_field_the_doc_lists_and_pressure_but_no_macos_one
             "\"quiet_streak\":0,\"over_cpu_streak\":0,\"over_gpu_streak\":0,",
             "\"pressure\":{\"cpu_some_avg10\":0.0,\"mem_some_avg10\":0.0,\"level\":\"normal\"},",
             "\"jobs\":{\"0192f3a1c2e0-9f3c2a7e5b1d4c88\":{\"cpu_millicores\":1850,\"mem_mb\":760}},",
+            "\"holder_passes\":{\"0192f3a1c2e0-9f3c2a7e5b1d4c88\":51900},",
             "\"seq_high\":4183,\"missing\":[]}"
         )
     );
@@ -118,6 +123,7 @@ fn a_running_job_whose_ticket_replay_hasnt_found_isnt_listed() {
     let json = now_json(&published(&Sample::at(ms(2_000))), &no_tickets);
 
     assert!(json.contains("\"jobs\":{},"), "{json}");
+    assert!(json.contains("\"holder_passes\":{},"), "{json}");
 }
 
 #[test]

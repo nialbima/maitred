@@ -90,6 +90,9 @@ pub struct Running<'a> {
     /// Its running threads in thousandths, summed into `maitred_running_threads` when it is measured. By default its
     /// CPU use: a job using 1100 millicores has about 1.1 threads running.
     pub threads_milli: u32,
+    /// When its holder last started a pass; `None` before its first. The sampler copies it into every sample
+    /// (`holder_passes`), measured or not, so holders can tell one that has stopped passing (ARCHITECTURE rev 172).
+    pub holder_pass: Option<Ms>,
 }
 
 impl<'a> Running<'a> {
@@ -100,6 +103,13 @@ impl<'a> Running<'a> {
         self
     }
 
+    /// Sets when its holder last started a pass.
+    #[must_use]
+    pub fn holder_passed(mut self, at: Ms) -> Self {
+        self.holder_pass = Some(at);
+        self
+    }
+
     #[must_use]
     pub fn measured(label: &'a str, uses: Amount) -> Self {
         Self {
@@ -107,6 +117,7 @@ impl<'a> Running<'a> {
             uses,
             measured: true,
             threads_milli: uses.cpu_millicores,
+            holder_pass: None,
         }
     }
 
@@ -117,6 +128,7 @@ impl<'a> Running<'a> {
             uses,
             measured: false,
             threads_milli: uses.cpu_millicores,
+            holder_pass: None,
         }
     }
 }
@@ -142,6 +154,8 @@ pub struct Published {
     pub over_gpu_streak: u32,
     /// Each running job's use, by label.
     pub jobs: Vec<(String, Amount)>,
+    /// When each running job's holder last started a pass, by label, for every job whose holder has passed.
+    pub holder_passes: Vec<(String, Ms)>,
     pub missing: Vec<Reading>,
 }
 
@@ -285,6 +299,10 @@ impl Publisher {
                 .iter()
                 .filter(|job| job.measured)
                 .map(|job| (job.label.to_string(), job.uses))
+                .collect(),
+            holder_passes: running
+                .iter()
+                .filter_map(|job| Some((job.label.to_string(), job.holder_pass?)))
                 .collect(),
             missing: sample.missing.clone(),
         }

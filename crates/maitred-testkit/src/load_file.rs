@@ -217,7 +217,8 @@ fn readings(json: &mut String, published: &Published, platform: Platform) {
     }
 }
 
-/// `jobs` and `seq_high`: each running job's use under its ticket id, for the jobs `replay` found a ticket for.
+/// `jobs`, `holder_passes` and `seq_high`: each running job's use and its holder's last pass (on the boot clock) under
+/// its ticket id, for the jobs `replay` found a ticket for.
 fn jobs(json: &mut String, published: &Published, written: &Written<'_>) {
     let entries: Vec<String> = published
         .jobs
@@ -230,10 +231,22 @@ fn jobs(json: &mut String, published: &Published, written: &Written<'_>) {
             ))
         })
         .collect();
+    let passes: Vec<String> = published
+        .holder_passes
+        .iter()
+        .filter_map(|(label, at)| {
+            let id = written.tickets.iter().find(|(l, _)| l == label)?.1;
+            Some(format!(
+                "\"{id}\":{}",
+                written.clocks.boot_ms_at_start + at.0
+            ))
+        })
+        .collect();
     let _ = write!(
         json,
-        "\"jobs\":{{{}}},\"seq_high\":{},",
+        "\"jobs\":{{{}}},\"holder_passes\":{{{}}},\"seq_high\":{},",
         entries.join(","),
+        passes.join(","),
         written.seq_high
     );
 }

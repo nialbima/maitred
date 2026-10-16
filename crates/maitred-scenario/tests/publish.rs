@@ -335,3 +335,23 @@ fn a_gap_within_load_freshness_keeps_the_streak() {
 
     assert_eq!(after_short_gap.over_cpu_streak, 2);
 }
+
+#[test]
+fn every_holder_that_has_passed_is_in_the_sample_measured_or_not() {
+    let mut publisher = Publisher::new(&machine());
+
+    let load_file = publisher.publish(
+        &Sample::at(ms(400)),
+        &[
+            Running::measured("a", job(500, 64)).holder_passed(ms(350)),
+            Running::unmeasured("b", job(500, 64)).holder_passed(ms(120)),
+            Running::measured("c", job(500, 64)),
+        ],
+        None,
+    );
+
+    assert_eq!(
+        load_file.holder_passes,
+        vec![("a".to_string(), ms(350)), ("b".to_string(), ms(120))]
+    );
+}
