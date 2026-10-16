@@ -28,6 +28,10 @@ pub struct Pool {
     pub size: u32,
     /// The environment variable that carries a job's slot number.
     pub variable: String,
+    /// The first slot's number; the pool's numbers run from it to `first + size - 1`.
+    pub first: u32,
+    /// Whether the first slot is passed as an empty string rather than its number (the `parallel_tests` convention).
+    pub empty_first: bool,
 }
 
 /// The machine's settings, as its administrator would write them.
@@ -154,14 +158,32 @@ impl MachineConfig {
         }
     }
 
-    /// Declares a slot pool.
+    /// Declares a slot pool numbered from 1.
     #[must_use]
     pub fn pool(mut self, name: &str, size: u32, variable: &str) -> Self {
         self.pools.push(Pool {
             name: name.into(),
             size,
             variable: variable.into(),
+            first: 1,
+            empty_first: false,
         });
+        self
+    }
+
+    /// Changes how the last declared pool numbers its slots.
+    ///
+    /// # Panics
+    ///
+    /// If no pool has been declared yet.
+    #[must_use]
+    pub fn numbered_from(mut self, first: u32, empty_first: bool) -> Self {
+        let pool = self
+            .pools
+            .last_mut()
+            .expect("numbered_from needs a pool declared before it");
+        pool.first = first;
+        pool.empty_first = empty_first;
         self
     }
 
