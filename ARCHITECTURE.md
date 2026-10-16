@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 202, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 204, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -470,7 +470,7 @@ A class file is read from the working tree, parsed on every run (it is small; th
 
 ### Format
 
-One rule per line, fields separated by `|` (space, bar, space); `#` starts a comment. A bar inside a pattern needs no escaping because the separator has spaces around it and alternation doesn't; a pattern that needs `|` literally uses `[ ]\|[ ]`.
+One rule per line, fields separated by `|` (space, bar, space); `#` at the start of a line makes it a comment (later in a line it is kept, since a pattern may hold one). A bar inside a pattern needs no escaping because the separator has spaces around it and alternation doesn't; a pattern that needs `|` literally uses `[ ]\|[ ]`. A pattern starts with ^ and its program's literal path (letters, digits, _ / + -, and punctuation escaped with a backslash), and the path ends where the program's name does: at the end of the pattern, a space, (, $, [ ], \s or \b. So ^bin/x[a-z] and ^bin/x|evil are invalid: each would claim one program and match another. A rule with no why field at all is reported as missing its why. cpu is cores to at most three decimal places and mem a whole number of M or G, both above zero; a checker's path stays inside the project (not absolute, no ..); a rule can name several pools with one slot= each, and gets a slot from each.
 
 | Field | Meaning |
 | --- | --- |
