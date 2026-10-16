@@ -47,6 +47,8 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
             0..1_000_000u64,
             0..12_000u64,
             proptest::option::weighted(0.02, 0..20u64),
+            // How long ago a ticket past waiting was admitted, so recency varies.
+            0..3_600_000u64,
         ),
     )
         .prop_map(
@@ -54,7 +56,7 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
                 (seq, class, state, liveness, holder_alive),
                 reservation,
                 pools,
-                (waited_ms, pass_age, recreated),
+                (waited_ms, pass_age, recreated, admitted_ago),
             )| {
                 let pools: BTreeSet<Pool> =
                     pools.into_iter().map(|p| Pool(POOLS[p].into())).collect();
@@ -77,7 +79,8 @@ fn ticket(index: usize) -> impl Strategy<Value = Ticket> {
                     slots,
                     waited_ms,
                     last_pass: BootTime(NOW.0 - pass_age),
-                    admitted_at: (state != State::Waiting).then_some(BootTime(NOW.0 - 60_000)),
+                    admitted_at: (state != State::Waiting)
+                        .then_some(BootTime(NOW.0 - admitted_ago)),
                     // Rarely recent, so most snapshots get past the recreation rule.
                     recreated_at: recreated.map(|age| BootTime(NOW.0 - age * 1_000)),
                 }
@@ -227,6 +230,7 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                         .map(|i| TicketId(format!("t{i}")))
                         .into_iter()
                         .collect(),
+                    held_outside: BTreeMap::new(),
                 }
             },
         )

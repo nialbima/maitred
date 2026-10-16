@@ -82,6 +82,7 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         last_heavy: None,
         moved: BTreeMap::new(),
         live_stop_markers: BTreeSet::new(),
+        held_outside: BTreeMap::new(),
     }
 }
 
@@ -1605,6 +1606,137 @@ fn an_aged_ticket_short_of_both_budget_and_a_slot_holds_no_budget() {
     snap.config
         .pools
         .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+// The struggle session on ba2af7b: MT-037, MT-003, MT-030, MT-031, MT-019 (C7).
+
+#[test]
+fn an_orphan_from_another_boot_never_counts_as_just_recreated() {
+    // Its recreated_at is on the previous boot's clock, so it can read as "just now" here.
+    let mut old = ticket("old", 0, Class::Light, State::Running);
+    old.liveness = Liveness::Orphaned { this_boot: false };
+    old.recreated_at = Some(NOW);
+    let snap = snapshot(vec![old, ticket("me", 1, Class::Light, State::Waiting)]);
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_slot_held_outside_any_ticket_is_taken() {
+    let pool = Pool("db".into());
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![mine]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
+    snap.held_outside.insert(pool.clone(), [1].into());
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
+}
+
+#[test]
+fn a_heavy_head_whose_slot_is_held_outside_any_ticket_does_not_restart_settle() {
+    let pool = Pool("db".into());
+    let mut head = ticket("head", 1, Class::Heavy, State::Waiting);
+    head.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![head, ticket("me", 2, Class::Heavy, State::Waiting)]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
+    snap.held_outside.insert(pool, [1].into());
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_retired_number_held_outside_any_ticket_does_not_use_up_the_range() {
+    let pool = Pool("db".into());
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![mine]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
+    snap.held_outside.insert(pool, [7].into());
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn a_lapsed_ticket_whose_slot_is_held_outside_any_ticket_does_not_drain() {
+    let pool = Pool("db".into());
+    let mut snap = snapshot(vec![
+        ticket("running", 0, Class::Light, State::Running),
+        lapsed_asking(&pool),
+        ticket("me", 2, Class::Light, State::Waiting),
+    ]);
+    snap.config
+        .pools
+        .insert(pool.clone(), PoolConfig { first: 1, size: 1 });
+    snap.held_outside.insert(pool, [1].into());
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn with_no_load_file_a_head_that_cannot_get_its_slot_does_not_hold_the_line() {
+    let mut head = ticket("head", 1, Class::Light, State::Waiting);
+    head.pools.insert(Pool("gone".into()));
+    let mut snap = snapshot(vec![head, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load = None;
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn with_no_load_file_a_ticket_that_cannot_get_its_slot_is_told_so() {
+    let pool = Pool("gone".into());
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    let mut snap = snapshot(vec![mine]);
+    snap.load = None;
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoSlot(pool)));
+}
+
+#[test]
+fn a_waiting_tickets_stale_slot_number_is_not_taken() {
+    // Adopted from admitted back to waiting, it may still name the slot it held.
+    let pool = Pool("db".into());
+    let mut mine = ticket("me", 1, Class::Light, State::Waiting);
+    mine.pools.insert(pool.clone());
+    mine.slots.insert(pool.clone(), 1);
+    let mut snap = snapshot(vec![mine]);
+    snap.config
+        .pools
+        .insert(pool, PoolConfig { first: 1, size: 1 });
+
+    assert_eq!(decide(&snap, &me()), admitted());
+}
+
+#[test]
+fn an_aged_ticket_that_could_never_fit_holds_no_budget() {
+    // C7: 3000 MB free; the aged ticket wants 15000, which no drain could free, so it holds nothing.
+    let mut aged = ticket("aged", 1, Class::Light, State::Waiting);
+    aged.reservation = Resources::new(1_000, 15_000);
+    aged.waited_ms = 600_001;
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(1_000, 100);
+    let mut snap = snapshot(vec![
+        ticket("running", 0, Class::Light, State::Running),
+        aged,
+        mine,
+    ]);
+    snap.load.as_mut().unwrap().mem_available_mb = Some(3_000);
 
     assert_eq!(decide(&snap, &me()), admitted());
 }

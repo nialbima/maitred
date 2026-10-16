@@ -64,9 +64,8 @@ proptest! {
 
     #[test]
     fn nothing_is_admitted_while_a_ticket_was_just_recreated(snap in snapshot()) {
-        let limit = snap.config.stall_limit_ms();
-        let recent = snap.tickets.iter().filter_map(|t| t.recreated_at).any(|at| snap.now.since(at) < limit);
-        prop_assert!(!recent || admissions(&snap).is_empty());
+        let recent = snap.recreated_recently();
+                prop_assert!(!recent || admissions(&snap).is_empty());
     }
 
     #[test]

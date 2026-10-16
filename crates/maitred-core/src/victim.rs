@@ -4,7 +4,7 @@
 
 use std::cmp::Reverse;
 
-use crate::{BootTime, Class, Liveness, Resources, Snapshot, State, Ticket, TicketId};
+use crate::{BootTime, Class, Resources, Snapshot, State, Ticket, TicketId};
 
 #[cfg(test)]
 mod props;
@@ -33,13 +33,14 @@ pub fn trigger(snap: &Snapshot) -> Option<Trigger> {
     }
     let load = snap.reliable_load()?;
     let config = &snap.config;
+    // Critical is the machine's state, whichever trigger fired: past mem_critical, or the CPU
+    // streak at twice its limit (Kill policy, step 2).
+    let critical = load.mem_available_mb < config.mem_critical_mb
+        || load.over_cpu_streak >= config.cpu_kill_samples.saturating_mul(2);
     if load.mem_available_mb < config.kill_floor_mb {
-        return Some(Trigger::Memory {
-            critical: load.mem_available_mb < config.mem_critical_mb,
-        });
+        return Some(Trigger::Memory { critical });
     }
     if load.over_cpu_streak >= config.cpu_kill_samples {
-        let critical = load.over_cpu_streak >= config.cpu_kill_samples.saturating_mul(2);
         return Some(Trigger::Cpu { critical });
     }
     if load.over_gpu_streak >= config.gpu_kill_samples {
@@ -96,11 +97,7 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
 /// A running job of this boot and namespace whose holder is alive, living or orphaned: only its
 /// holder can carry out a kill.
 fn is_candidate(t: &Ticket) -> bool {
-    let this_boot = match t.liveness {
-        Liveness::Living => true,
-        Liveness::Orphaned { this_boot } => this_boot,
-    };
-    t.state == State::Running && t.holder_alive && this_boot
+    t.state == State::Running && t.holder_alive && t.is_this_boot()
 }
 
 /// How far a job's use in the sample is over its reservation on one resource, if it is over. A job

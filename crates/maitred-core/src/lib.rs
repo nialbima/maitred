@@ -17,7 +17,7 @@ mod testgen;
 mod ticket;
 mod victim;
 
-pub use config::{ClassMinimums, Config, PoolConfig};
+pub use config::{ClassMinimums, Config, ConfigError, PoolConfig};
 pub use decide::{Admission, Decision, Limit, Reason, decide};
 pub use resources::Resources;
 pub use snapshot::{Load, Snapshot};

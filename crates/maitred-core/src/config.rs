@@ -56,12 +56,39 @@ impl Config {
         asked.max(self.class_min.of(class)).min(capacity)
     }
 
+    /// Checks the thresholds whose wrong values would make the kill policy misbehave.
+    ///
+    /// # Errors
+    ///
+    /// The first threshold that is out of order.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.cpu_kill_samples == 0 {
+            return Err(ConfigError::KillSamples("cpu_kill_samples"));
+        }
+        if self.gpu_kill_samples == 0 {
+            return Err(ConfigError::KillSamples("gpu_kill_samples"));
+        }
+        if !(self.mem_critical_mb < self.kill_floor_mb && self.kill_floor_mb < self.mem_floor_mb) {
+            return Err(ConfigError::MemoryThresholds);
+        }
+        Ok(())
+    }
+
     /// How old the load file may be and still count as fresh.
     #[must_use]
     pub fn load_freshness_ms(&self) -> u64 {
         self.load_freshness_samples
             .saturating_mul(self.sample_interval_ms)
     }
+}
+
+/// A machine config that would make the kill policy misbehave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigError {
+    /// A kill streak of 0 samples would trigger on a healthy machine, critically.
+    KillSamples(&'static str),
+    /// The memory thresholds must rise: `mem_critical` < `kill_floor` < `mem_floor`.
+    MemoryThresholds,
 }
 
 /// The least a ticket of each class reserves, whatever it asks for.
@@ -97,5 +124,85 @@ impl PoolConfig {
     #[must_use]
     pub fn contains(&self, n: u32) -> bool {
         n >= self.first && n - self.first < self.size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid() -> Config {
+        Config {
+            poll_interval_ms: 2_000,
+            sample_interval_ms: 2_000,
+            settle_ms: 30_000,
+            aging_ms: 600_000,
+            aging_hold_ms: 600_000,
+            quiet_max_wait_ms: 3_600_000,
+            stall_polls: 5,
+            load_freshness_samples: 3,
+            mem_floor_mb: 1_000,
+            kill_floor_mb: 500,
+            mem_critical_mb: 200,
+            cpu_ceiling: 1.5,
+            gpu_ceiling: 0.9,
+            cpu_kill_samples: 3,
+            gpu_kill_samples: 3,
+            max_running_heavy: 2,
+            quiet_streak_needed: 2,
+            class_min: ClassMinimums::default(),
+            pools: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_sensible_config_is_valid() {
+        assert_eq!(valid().validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_cpu_kill_after_zero_samples_is_refused() {
+        let config = Config {
+            cpu_kill_samples: 0,
+            ..valid()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::KillSamples("cpu_kill_samples"))
+        );
+    }
+
+    #[test]
+    fn a_gpu_kill_after_zero_samples_is_refused() {
+        let config = Config {
+            gpu_kill_samples: 0,
+            ..valid()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::KillSamples("gpu_kill_samples"))
+        );
+    }
+
+    #[test]
+    fn mem_critical_at_or_above_the_kill_floor_is_refused() {
+        let config = Config {
+            mem_critical_mb: 500,
+            ..valid()
+        };
+
+        assert_eq!(config.validate(), Err(ConfigError::MemoryThresholds));
+    }
+
+    #[test]
+    fn a_kill_floor_at_or_above_the_admission_floor_is_refused() {
+        let config = Config {
+            kill_floor_mb: 1_000,
+            ..valid()
+        };
+
+        assert_eq!(config.validate(), Err(ConfigError::MemoryThresholds));
     }
 }

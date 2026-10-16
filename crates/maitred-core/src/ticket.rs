@@ -88,6 +88,15 @@ pub struct Ticket {
 }
 
 impl Ticket {
+    /// Written in this boot and pid namespace, so its times and pids mean something here. Times
+    /// from another boot are on another boot clock and can read as "just now".
+    pub(crate) fn is_this_boot(&self) -> bool {
+        match self.liveness {
+            Liveness::Living => true,
+            Liveness::Orphaned { this_boot } => this_boot,
+        }
+    }
+
     pub(crate) fn is_living(&self) -> bool {
         self.liveness == Liveness::Living
     }

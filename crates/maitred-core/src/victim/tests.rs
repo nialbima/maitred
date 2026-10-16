@@ -80,6 +80,7 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         last_heavy: None,
         moved: BTreeMap::new(),
         live_stop_markers: BTreeSet::new(),
+        held_outside: BTreeMap::new(),
     }
 }
 
@@ -180,13 +181,14 @@ fn a_gpu_streak_short_of_its_limit_triggers_nothing() {
 
 #[test]
 fn memory_comes_before_cpu_and_gpu() {
+    // A CPU streak of 9 is past twice its limit, so the memory breach is critical too.
     let mut snap = snapshot(vec![]);
     short_of_memory(&mut snap);
     let load = snap.load.as_mut().unwrap();
     load.over_cpu_streak = 9;
     load.over_gpu_streak = 9;
 
-    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: false }));
+    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: true }));
 }
 
 #[test]
@@ -273,16 +275,16 @@ fn the_job_furthest_over_its_memory_is_chosen() {
 
 #[test]
 fn the_job_furthest_over_its_cpu_is_chosen() {
-    let a = running("a", Class::Light, 60_000);
-    let b = running("b", Class::Light, 120_000);
+    let a = running("z-over", Class::Light, 60_000);
+    let b = running("a-less", Class::Light, 120_000);
     let mut snap = snapshot(vec![a, b]);
     let jobs = &mut snap.load.as_mut().unwrap().jobs;
-    jobs.insert(TicketId("a".into()), Resources::new(4_000, 500));
-    jobs.insert(TicketId("b".into()), Resources::new(2_000, 9_000));
+    jobs.insert(TicketId("z-over".into()), Resources::new(4_000, 500));
+    jobs.insert(TicketId("a-less".into()), Resources::new(2_000, 9_000));
 
     assert_eq!(
         choose_victim(&snap, Trigger::Cpu { critical: false }),
-        Some(id("a"))
+        Some(id("z-over"))
     );
 }
 
@@ -321,16 +323,16 @@ fn a_job_exactly_at_its_reservation_is_not_over_it() {
 
 #[test]
 fn equal_overuse_goes_to_the_more_recently_admitted() {
-    let a = running("a", Class::Light, 60_000);
-    let b = running("b", Class::Light, 120_000);
+    let a = running("z-newer", Class::Light, 60_000);
+    let b = running("a-older", Class::Light, 120_000);
     let mut snap = snapshot(vec![b, a]);
     let jobs = &mut snap.load.as_mut().unwrap().jobs;
-    jobs.insert(TicketId("a".into()), Resources::new(0, 2_000));
-    jobs.insert(TicketId("b".into()), Resources::new(0, 2_000));
+    jobs.insert(TicketId("z-newer".into()), Resources::new(0, 2_000));
+    jobs.insert(TicketId("a-older".into()), Resources::new(0, 2_000));
 
     assert_eq!(
         choose_victim(&snap, Trigger::Memory { critical: false }),
-        Some(id("a"))
+        Some(id("z-newer"))
     );
 }
 
@@ -352,14 +354,14 @@ fn with_nobody_over_the_newest_heavy_job_is_chosen() {
 #[test]
 fn with_no_heavy_job_the_newest_light_job_is_chosen() {
     let snap = snapshot(vec![
-        running("old-light", Class::Light, 600_000),
-        running("new-light", Class::Light, 60_000),
+        running("a-old-light", Class::Light, 600_000),
+        running("z-new-light", Class::Light, 60_000),
         running("quiet", Class::Quiet, 1_000),
     ]);
 
     assert_eq!(
         choose_victim(&snap, Trigger::Cpu { critical: false }),
-        Some(id("new-light"))
+        Some(id("z-new-light"))
     );
 }
 
@@ -414,15 +416,15 @@ fn a_quiet_job_over_its_reservation_is_chosen_like_any_other() {
 #[test]
 fn gpu_ignores_use_and_takes_the_newest_heavy_job() {
     let mut snap = snapshot(vec![
-        running("hungry-light", Class::Light, 1_000),
-        running("heavy", Class::Heavy, 60_000),
+        running("a-hungry-light", Class::Light, 1_000),
+        running("z-heavy", Class::Heavy, 60_000),
     ]);
     snap.load.as_mut().unwrap().jobs.insert(
-        TicketId("hungry-light".into()),
+        TicketId("a-hungry-light".into()),
         Resources::new(8_000, 9_000),
     );
 
-    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("heavy")));
+    assert_eq!(choose_victim(&snap, Trigger::Gpu), Some(id("z-heavy")));
 }
 
 #[test]
@@ -556,4 +558,37 @@ fn a_missing_cpu_use_reading_turns_the_kill_policy_off() {
     snap.load.as_mut().unwrap().cpu_used_millicores = None;
 
     assert_eq!(trigger(&snap), None);
+}
+
+// The struggle session on ba2af7b: MT-037, MT-028.
+
+#[test]
+fn an_orphan_from_another_boot_never_freezes_the_kill_policy() {
+    let mut old = running("old", Class::Light, 60_000);
+    old.liveness = Liveness::Orphaned { this_boot: false };
+    old.recreated_at = Some(NOW);
+    let mut snap = snapshot(vec![old]);
+    short_of_memory(&mut snap);
+
+    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: false }));
+}
+
+#[test]
+fn a_memory_breach_is_critical_when_the_cpu_streak_is() {
+    let mut snap = snapshot(vec![]);
+    short_of_memory(&mut snap);
+    snap.load.as_mut().unwrap().over_cpu_streak = 6;
+
+    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: true }));
+}
+
+#[test]
+fn a_cpu_breach_is_critical_when_memory_is() {
+    let mut snap = snapshot(vec![]);
+    let load = snap.load.as_mut().unwrap();
+    load.over_cpu_streak = 3;
+    load.mem_available_mb = Some(199);
+
+    // Memory below mem_critical is also below kill_floor, so memory triggers first, critical.
+    assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: true }));
 }

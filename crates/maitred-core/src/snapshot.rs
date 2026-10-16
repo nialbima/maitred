@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{BootTime, Config, Position, Resources, Ticket, TicketId};
+use crate::{BootTime, Config, Pool, Position, Resources, Ticket, TicketId};
 
 /// Everything one pass knows, built by the store under `admit.lock` (ARCHITECTURE.md, One pass, step
 /// 3). `decide` and `choose_victim` read nothing else, so every waiter computes the same answer from
@@ -24,6 +24,10 @@ pub struct Snapshot {
     /// Tickets whose stop marker exists and is locked: a kill is under way. A marker whose lock is
     /// free belongs to a dead holder and isn't here.
     pub live_stop_markers: BTreeSet<TicketId>,
+    /// Slot numbers whose lock the snapshot's builder couldn't take though no ticket names them: a
+    /// leftover daemon holds them, or the sampler hasn't made their file yet. Taken, and no drain
+    /// frees them.
+    pub held_outside: BTreeMap<Pool, BTreeSet<u32>>,
 }
 
 impl Snapshot {
@@ -34,6 +38,7 @@ impl Snapshot {
     pub fn recreated_recently(&self) -> bool {
         self.tickets
             .iter()
+            .filter(|t| t.is_this_boot())
             .filter_map(|t| t.recreated_at)
             .any(|at| self.now.since(at) < self.config.stall_limit_ms())
     }

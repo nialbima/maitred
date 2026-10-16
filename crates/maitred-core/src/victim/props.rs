@@ -4,6 +4,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::testgen::snapshot;
+use crate::{Resources, Snapshot, Ticket};
 
 fn triggers() -> impl Strategy<Value = Trigger> {
     prop_oneof![
@@ -52,5 +53,48 @@ proptest! {
         }
         prop_assert_eq!(choose_victim(&snap, trigger), choose_victim(&shuffled, trigger));
         prop_assert_eq!(super::trigger(&snap), super::trigger(&shuffled));
+    }
+}
+
+/// How far `t`'s use in the sample is over its reservation on the trigger's resource, if it is.
+fn over_by(snap: &Snapshot, t: &Ticket, trigger: Trigger) -> Option<u64> {
+    let of: fn(Resources) -> u64 = match trigger {
+        Trigger::Memory { .. } => |r| r.mem_mb,
+        Trigger::Cpu { .. } => |r| r.cpu_millicores,
+        Trigger::Gpu => return None,
+    };
+    let load = snap.load.as_ref()?;
+    let used = of(*load.jobs.get(&t.id)?);
+    let reserved = of(snap.config.reserve(t.class, t.reservation, load.capacity));
+    used.checked_sub(reserved).filter(|&by| by > 0)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 2_000, ..ProptestConfig::default() })]
+
+    /// Which job, not just whether: the furthest over its reservation if any candidate is over;
+    /// otherwise the most recently admitted of the first class present in kill order.
+    #[test]
+    fn the_victim_is_the_furthest_over_or_else_the_newest_in_kill_order(snap in snapshot(), trigger in triggers()) {
+        let Some(victim) = choose_victim(&snap, trigger) else { return Ok(()) };
+        let candidates: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_candidate(t)).collect();
+        let chosen = candidates.iter().find(|t| t.id == victim).expect("the victim is a candidate");
+        let furthest = candidates.iter().filter_map(|t| over_by(&snap, t, trigger)).max();
+        if let Some(most) = furthest {
+            prop_assert_eq!(over_by(&snap, chosen, trigger), Some(most));
+            for t in &candidates {
+                if over_by(&snap, t, trigger) == Some(most) {
+                    prop_assert!(t.admitted_at <= chosen.admitted_at);
+                }
+            }
+        } else {
+            let critical = matches!(trigger, Trigger::Memory { critical: true } | Trigger::Cpu { critical: true });
+            let order: &[Class] = if critical { &[Class::Heavy, Class::Light, Class::Quiet] } else { &[Class::Heavy, Class::Light] };
+            let first = order.iter().find(|c| candidates.iter().any(|t| t.class == **c)).expect("some class is present");
+            prop_assert_eq!(chosen.class, *first);
+            for t in candidates.iter().filter(|t| t.class == *first) {
+                prop_assert!(t.admitted_at <= chosen.admitted_at);
+            }
+        }
     }
 }

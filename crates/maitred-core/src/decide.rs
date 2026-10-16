@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::snapshot::Reliable;
 use crate::{
-    BootTime, Class, Config, Liveness, Pool, Position, Resources, Snapshot, State, Ticket, TicketId,
+    BootTime, Class, Config, Liveness, Pool, PoolConfig, Position, Resources, Snapshot, State,
+    Ticket, TicketId,
 };
 
 #[cfg(test)]
@@ -172,8 +173,9 @@ pub fn decide(snap: &Snapshot, me: &TicketId) -> Decision {
             return Decision::Wait(Reason::DrainingFor(t.id.clone()));
         }
         // An aged ticket that only the budget keeps out holds its place in it; one waiting for a
-        // slot or kept out by its class would hold budget it can't use.
-        if walk.aged(t) && held == Reason::Budget {
+        // slot, kept out by its class, or too big to fit even once drained would hold budget it
+        // can't use.
+        if walk.aged(t) && held == Reason::Budget && walk.fits_once_drained(t) {
             walk.hold(t);
         }
     }
@@ -190,11 +192,17 @@ fn fallback(snap: &Snapshot, mine: &Ticket, me: &TicketId, charged: &[&Ticket]) 
     }
     // As for first in, a charged orphan doesn't count: one that never ends must not hold the queue.
     let nothing_charged = !charged.iter().any(|t| t.is_living()) && snap.unreadable == 0;
+    if let Err(reason) = slots_free(snap, mine, &BTreeMap::new()) {
+        return Decision::Wait(reason);
+    }
+    // First in line among those the fallback could admit: a quiet ticket not yet due, or one whose
+    // slot isn't free, doesn't hold the line for anyone else.
     let first = waiting(snap, false)
         .into_iter()
-        .find(|t| t.class != Class::Quiet || due_quiet(&snap.config, t))
+        .filter(|t| t.class != Class::Quiet || due_quiet(&snap.config, t))
+        .find(|t| slots_free(snap, t, &BTreeMap::new()).is_ok())
         .map(|t| &t.id);
-    if nothing_charged && first == Some(me) && slots_free(snap, mine, &BTreeMap::new()).is_ok() {
+    if nothing_charged && first == Some(me) {
         Decision::Admit(Admission {
             fallback: true,
             tainted: mine.class == Class::Quiet,
@@ -255,18 +263,34 @@ fn slots_free(snap: &Snapshot, t: &Ticket, on_paper: &BTreeMap<Pool, u32>) -> Re
         let Some(cfg) = snap.config.pools.get(pool) else {
             return Err(Reason::NoSlot(pool.clone()));
         };
-        let named = snap
-            .tickets
-            .iter()
-            .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
-            .count();
-        let taken = u64::try_from(named).unwrap_or(u64::MAX)
+        let taken = taken_in_range(snap, pool, *cfg, |_| true)
             + u64::from(on_paper.get(pool).copied().unwrap_or(0));
         if taken >= u64::from(cfg.size) {
             return Err(Reason::NoSlot(pool.clone()));
         }
     }
     Ok(())
+}
+
+/// How many of a pool's current numbers are taken: named by a ticket past waiting that `holder`
+/// selects (a waiting ticket holds no slot, whatever stale number it still names), or held outside
+/// any ticket. A number outside the range is retired and uses none of it.
+fn taken_in_range(
+    snap: &Snapshot,
+    pool: &Pool,
+    cfg: PoolConfig,
+    holder: impl Fn(&Ticket) -> bool,
+) -> u64 {
+    let named = snap
+        .tickets
+        .iter()
+        .filter(|o| o.state != State::Waiting && holder(o))
+        .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
+        .count();
+    let outside = snap.held_outside.get(pool).map_or(0, |numbers| {
+        numbers.iter().filter(|&&n| cfg.contains(n)).count()
+    });
+    u64::try_from(named + outside).unwrap_or(u64::MAX)
 }
 
 /// The budget and the counts as the walk changes them on paper.
@@ -388,14 +412,9 @@ impl<'a> Walk<'a> {
     fn fits_once_drained(&self, t: &Ticket) -> bool {
         let slots = t.pools.iter().all(|pool| {
             self.snap.config.pools.get(pool).is_some_and(|cfg| {
-                let kept = self
-                    .snap
-                    .tickets
-                    .iter()
-                    .filter(|o| !o.is_living())
-                    .filter(|o| o.slots.get(pool).is_some_and(|&n| cfg.contains(n)))
-                    .count();
-                u64::try_from(kept).unwrap_or(u64::MAX) < u64::from(cfg.size)
+                // A drain ends living jobs only: what non-living tickets name, or what is held
+                // outside any ticket, stays taken.
+                taken_in_range(self.snap, pool, *cfg, |o| !o.is_living()) < u64::from(cfg.size)
             })
         });
         slots && i128::from(self.reserve(t).mem_mb) <= self.drained_mem
