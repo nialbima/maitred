@@ -81,6 +81,8 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         moved: BTreeMap::new(),
         live_stop_markers: BTreeSet::new(),
         held_outside: BTreeMap::new(),
+        named_victim: None,
+        my_wake: None,
     }
 }
 
@@ -591,4 +593,66 @@ fn a_cpu_breach_is_critical_when_memory_is() {
 
     // Memory below mem_critical is also below kill_floor, so memory triggers first, critical.
     assert_eq!(trigger(&snap), Some(Trigger::Memory { critical: true }));
+}
+
+// MT-034 (Nick, 2026-10-16): the first holder to choose writes its choice down; later holders honour
+// it while that ticket is still a candidate, even if their newer sample would choose differently.
+
+#[test]
+fn a_victim_named_earlier_for_this_breach_is_kept() {
+    let a = running("a", Class::Light, 60_000);
+    let b = running("b", Class::Light, 120_000);
+    let mut snap = snapshot(vec![a, b]);
+    let jobs = &mut snap.load.as_mut().unwrap().jobs;
+    jobs.insert(TicketId("a".into()), Resources::new(0, 1_500));
+    jobs.insert(TicketId("b".into()), Resources::new(0, 3_000));
+    snap.named_victim = Some(id("a"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("a"))
+    );
+}
+
+#[test]
+fn a_named_victim_that_is_no_longer_a_candidate_is_chosen_again() {
+    let mut gone = running("gone", Class::Heavy, 1_000);
+    gone.holder_alive = false;
+    let mut snap = snapshot(vec![gone, running("other", Class::Heavy, 60_000)]);
+    snap.named_victim = Some(id("gone"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("other"))
+    );
+}
+
+#[test]
+fn a_named_quiet_victim_is_not_kept_when_the_breach_is_no_longer_critical() {
+    // Being named doesn't widen who may go: a quiet job goes only past the critical threshold.
+    let mut snap = snapshot(vec![
+        running("quiet", Class::Quiet, 1_000),
+        running("heavy", Class::Heavy, 60_000),
+    ]);
+    snap.named_victim = Some(id("quiet"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("heavy"))
+    );
+}
+
+#[test]
+fn a_named_victim_within_its_reservation_still_stands() {
+    // Recency alone would take the heavy job; the light job was named first and isn't quiet.
+    let mut snap = snapshot(vec![
+        running("light", Class::Light, 1_000),
+        running("heavy", Class::Heavy, 60_000),
+    ]);
+    snap.named_victim = Some(id("light"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("light"))
+    );
 }

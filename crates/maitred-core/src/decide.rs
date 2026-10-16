@@ -236,12 +236,17 @@ fn is_charged(t: &Ticket) -> bool {
 /// Living waiting tickets by `(position, id)`, without those whose last pass is older than
 /// `limit`.
 fn waiting(snap: &Snapshot, limit: u64) -> Vec<&Ticket> {
-    // Nobody is judged stalled until the stall limit has passed since the machine last woke.
+    // Nobody is judged stalled until a stall limit has passed since the machine last woke: by the
+    // sampler's woke_at, or by this supervisor's own wake (a gap in its passes), which needs no
+    // sampler and covers the pre-sleep load file a waker reads first.
+    let stall_limit = snap.config.stall_limit_ms();
     let woke_recently = snap
         .load
         .as_ref()
         .and_then(|l| l.woke_at)
-        .is_some_and(|w| snap.now.since(w) < limit);
+        .into_iter()
+        .chain(snap.my_wake)
+        .any(|w| snap.now.since(w) < stall_limit);
     let mut tickets: Vec<&Ticket> = snap
         .tickets
         .iter()

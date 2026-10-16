@@ -173,6 +173,10 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
         proptest::option::weighted(0.05, 0..8usize),
         // An administrator's move in 10%: ticket i sorts at seq s with sub -1.
         proptest::option::weighted(0.1, (0..8usize, 0..6u64)),
+        // A victim already named for the breach in 10%.
+        proptest::option::weighted(0.1, 0..8usize),
+        // This supervisor woke (a gap in its own passes) within the last 20 s in 10%.
+        proptest::option::weighted(0.1, 0..20_000u64),
     )
         .prop_map(
             |(
@@ -183,6 +187,8 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                 (max_heavy, heavy_min, db, port),
                 marker,
                 mv,
+                named,
+                woke,
             )| {
                 Snapshot {
                     now: NOW,
@@ -234,6 +240,8 @@ pub(crate) fn snapshot() -> impl Strategy<Value = Snapshot> {
                         .into_iter()
                         .collect(),
                     held_outside: BTreeMap::new(),
+                    named_victim: named.map(|i| TicketId(format!("t{i}"))),
+                    my_wake: woke.map(|ago| BootTime(NOW.0 - ago)),
                 }
             },
         )

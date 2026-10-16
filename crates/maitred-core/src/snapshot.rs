@@ -28,6 +28,14 @@ pub struct Snapshot {
     /// leftover daemon holds them, or the sampler hasn't made their file yet. Taken, and no drain
     /// frees them.
     pub held_outside: BTreeMap<Pool, BTreeSet<u32>>,
+    /// The victim the first holder named for the breach under way, if any: later holders keep it
+    /// while it is still a candidate, so holders reading different samples can't name each other.
+    pub named_victim: Option<TicketId>,
+    /// When this supervisor last found a gap between its own passes longer than the stall limit:
+    /// the machine slept, or it was stopped. Until a stall limit has passed since, it judges nobody
+    /// stalled, since the others may not have passed since waking either. Unlike `woke_at`, it
+    /// needs no sampler.
+    pub my_wake: Option<BootTime>,
 }
 
 impl Snapshot {

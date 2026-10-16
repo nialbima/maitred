@@ -52,7 +52,8 @@ pub fn trigger(snap: &Snapshot) -> Option<Trigger> {
 /// The one job to stop for `trigger`, or none. For memory or CPU, the candidate furthest over its
 /// reservation on that resource, if any is over; otherwise the most recently admitted heavy job,
 /// then light, and quiet only when the trigger is critical. GPU has no per-job figure, so recency
-/// alone, and never a quiet job. Pure: per-job use comes only from the sample.
+/// alone, and never a quiet job. A victim named earlier for this breach stands while it is still
+/// eligible. Pure: per-job use comes only from the sample.
 #[must_use]
 pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
     if !snap.live_stop_markers.is_empty() || snap.recreated_recently() {
@@ -65,6 +66,24 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
         Trigger::Cpu { .. } => Some(|r| r.cpu_millicores),
         Trigger::Gpu => None,
     };
+    let critical = matches!(
+        trigger,
+        Trigger::Memory { critical: true } | Trigger::Cpu { critical: true }
+    );
+
+    // The victim named earlier for this breach stands while it is still a candidate this rule may
+    // choose (MT-034), so holders reading different samples can't name each other and stand down.
+    if let Some(named) = snap.named_victim.as_ref() {
+        let still = candidates.iter().find(|t| &t.id == named).is_some_and(|t| {
+            t.class != Class::Quiet
+                || critical
+                || dimension.is_some_and(|of| over(snap, t, of).is_some())
+        });
+        if still {
+            return Some(named.clone());
+        }
+    }
+
     if let Some(of) = dimension {
         // Furthest over, then most recent, then smallest id.
         let furthest = candidates
@@ -76,10 +95,6 @@ pub fn choose_victim(snap: &Snapshot, trigger: Trigger) -> Option<TicketId> {
         }
     }
 
-    let critical = matches!(
-        trigger,
-        Trigger::Memory { critical: true } | Trigger::Cpu { critical: true }
-    );
     let classes: &[Class] = if critical {
         &[Class::Heavy, Class::Light, Class::Quiet]
     } else {

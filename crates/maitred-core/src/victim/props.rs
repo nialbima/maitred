@@ -66,6 +66,10 @@ proptest! {
     /// otherwise the most recently admitted of the first class present in kill order.
     #[test]
     fn the_victim_is_the_furthest_over_or_else_the_newest_in_kill_order(snap in snapshot(), trigger in triggers()) {
+        // A named victim is the next property's.
+        if snap.named_victim.is_some() {
+            return Ok(());
+        }
         let Some(victim) = choose_victim(&snap, trigger) else { return Ok(()) };
         let candidates: Vec<&Ticket> = snap.tickets.iter().filter(|t| is_candidate(t)).collect();
         let chosen = candidates.iter().find(|t| t.id == victim).expect("the victim is a candidate");
@@ -85,6 +89,20 @@ proptest! {
             for t in candidates.iter().filter(|t| t.class == *first) {
                 prop_assert!(t.admitted_at <= chosen.admitted_at);
             }
+        }
+    }
+
+    /// A victim named earlier for the breach stands while it is a candidate this rule may choose.
+    #[test]
+    fn a_named_victim_stands_while_it_is_eligible(snap in snapshot(), trigger in triggers()) {
+        let Some(named) = snap.named_victim.clone() else { return Ok(()) };
+        let critical = matches!(trigger, Trigger::Memory { critical: true } | Trigger::Cpu { critical: true });
+        let eligible = snap.tickets.iter().find(|t| t.id == named).is_some_and(|t| {
+            is_candidate(t) && (t.class != Class::Quiet || critical || over_by(&snap, t, trigger).is_some())
+        });
+        let blocked = !snap.live_stop_markers.is_empty() || snap.recreated_recently();
+        if eligible && !blocked {
+            prop_assert_eq!(choose_victim(&snap, trigger), Some(named));
         }
     }
 }

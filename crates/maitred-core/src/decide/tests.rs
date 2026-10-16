@@ -83,6 +83,8 @@ fn snapshot(tickets: Vec<Ticket>) -> Snapshot {
         moved: BTreeMap::new(),
         live_stop_markers: BTreeSet::new(),
         held_outside: BTreeMap::new(),
+        named_victim: None,
+        my_wake: None,
     }
 }
 
@@ -1826,4 +1828,64 @@ fn with_no_load_file_a_head_silent_for_exactly_three_stall_limits_still_holds_th
     snap.load = None;
 
     assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+}
+
+// Qualmaude's hold on d4a1410 (MT-039): a supervisor that finds a gap in its own passes longer than
+// the stall limit has just woken (or was stopped), and judges nobody stalled for one stall limit, so
+// the first to pass after a wake can't jump everyone whose last pass is from before the sleep.
+
+#[test]
+fn the_first_waiter_to_pass_after_a_wake_does_not_jump_the_queue() {
+    let mut asleep = ticket("asleep", 1, Class::Light, State::Waiting);
+    asleep.last_pass = BootTime(NOW.0 - 3_600_000);
+    let mut snap = snapshot(vec![asleep, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load = None;
+    snap.my_wake = Some(NOW);
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+}
+
+#[test]
+fn after_a_wake_with_a_stale_load_file_the_first_waiter_does_not_jump_either() {
+    let mut asleep = ticket("asleep", 1, Class::Light, State::Waiting);
+    asleep.last_pass = BootTime(NOW.0 - 3_600_000);
+    let mut snap = snapshot(vec![asleep, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load.as_mut().unwrap().sampled_at = BootTime(NOW.0 - 3_600_000);
+    snap.my_wake = Some(BootTime(NOW.0 - 9_999));
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::NoReliableLoad));
+}
+
+#[test]
+fn a_stopped_head_still_lapses_once_the_stall_limit_has_passed_since_my_wake() {
+    let mut stopped = ticket("stopped", 1, Class::Light, State::Waiting);
+    stopped.last_pass = BootTime(NOW.0 - 3_600_000);
+    let mut snap = snapshot(vec![stopped, ticket("me", 2, Class::Light, State::Waiting)]);
+    snap.load = None;
+    snap.my_wake = Some(BootTime(NOW.0 - 10_000));
+
+    assert_eq!(
+        decide(&snap, &me()),
+        Decision::Admit(Admission {
+            fallback: true,
+            ..Admission::default()
+        })
+    );
+}
+
+#[test]
+fn my_own_wake_also_suspends_stalls_in_the_walk() {
+    // With reliable load the walk uses the sampler's woke_at; my own wake counts too, so a fresh
+    // sample published before the others pass doesn't open the queue to me first.
+    let mut running = ticket("running", 0, Class::Light, State::Running);
+    running.reservation = Resources::new(4_000, 1_000);
+    let mut asleep = ticket("asleep", 1, Class::Light, State::Waiting);
+    asleep.reservation = Resources::new(3_000, 1_000);
+    asleep.last_pass = BootTime(NOW.0 - 3_600_000);
+    let mut mine = ticket("me", 2, Class::Light, State::Waiting);
+    mine.reservation = Resources::new(3_000, 1_000);
+    let mut snap = snapshot(vec![running, asleep, mine]);
+    snap.my_wake = Some(BootTime(NOW.0 - 9_999));
+
+    assert_eq!(decide(&snap, &me()), Decision::Wait(Reason::Budget));
 }
