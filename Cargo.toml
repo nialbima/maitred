@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Claude Code leaves an empty .claude folder in a directory a session worked from.
+exclude = ["crates/.claude"]
 
 [workspace.package]
 version = "0.0.0"
