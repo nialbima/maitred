@@ -2,4 +2,5 @@
 //! checker and the scenarios. Owned by the test kit, never shipped, and never dependent on the `maitred`
 //! crate.
 
+pub mod regressions;
 pub mod timing;
