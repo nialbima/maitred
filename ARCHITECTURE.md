@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 204, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 207, 2026-10-16):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -470,7 +470,7 @@ A class file is read from the working tree, parsed on every run (it is small; th
 
 ### Format
 
-One rule per line, fields separated by `|` (space, bar, space); `#` at the start of a line makes it a comment (later in a line it is kept, since a pattern may hold one). A bar inside a pattern needs no escaping because the separator has spaces around it and alternation doesn't; a pattern that needs `|` literally uses `[ ]\|[ ]`. A pattern starts with ^ and its program's literal path (letters, digits, _ / + -, and punctuation escaped with a backslash), and the path ends where the program's name does: at the end of the pattern, a space, (, $, [ ], \s or \b. So ^bin/x[a-z] and ^bin/x|evil are invalid: each would claim one program and match another. A rule with no why field at all is reported as missing its why. cpu is cores to at most three decimal places and mem a whole number of M or G, both above zero; a checker's path stays inside the project (not absolute, no ..); a rule can name several pools with one slot= each, and gets a slot from each.
+One rule per line, fields separated by `|` (space, bar, space); `#` at the start of a line makes it a comment (later in a line it is kept, since a pattern may hold one). A bar inside a pattern needs no escaping because the separator has spaces around it and alternation doesn't; a pattern that needs `|` literally uses `[ ]\|[ ]`. A pattern starts with ^ and its program's literal path (letters, digits, _ / + -, and punctuation escaped with a backslash), and the path ends where the program's name does: at the end of the pattern, a space, (, $, [ ], \s or \b. That catches the common mistakes, such as ^bin/x[a-z], when the file is read; the guarantee is in Matching: a rule applies only to its own program. A rule with no why field at all is reported as missing its why. cpu is cores to at most three decimal places and mem a whole number of M or G, both above zero; a checker's path stays inside the project (not absolute, no ..); a rule can name several pools with one slot= each, and gets a slot from each.
 
 | Field | Meaning |
 | --- | --- |
@@ -505,9 +505,9 @@ maitred matches the job's argv as the operating system handed it over. There is 
 2. **Normalise the program.** A path into the project (`./bin/x`, `bin/x`, or its absolute path) is rewritten relative to the project root, so all three match `^bin/x`.
 3. **Strip launchers** the machine config lists (`bundle exec`, `bin/bundle exec`, `npx`, `pnpm exec`, `yarn`, `uv run`, `poetry run`, `ruby -S`, and the like), after normalising, so a launcher run from `bin/` is recognised; then normalise again.
 4. **Join** the argv with single spaces, quoting any argument that contains whitespace or quotes.
-5. **Match.** The first rule whose pattern matches wins; no match means heavy. A pattern sees the argv after wrappers and launchers are stripped, but a program's own options stay, so the rule matches them itself: ^make( -C [^ ]+)? +release for make -C dir release.
+5. **Match.** The first rule that applies wins: one whose program is the command's program, after wrappers and launchers are stripped, and whose pattern matches. No match means heavy. A rule applies only to its own program, so no pattern, however it is written (^bin/x |evil, ^bin/x\b against bin/x.rb), classes another one. A pattern sees the argv after wrappers and launchers are stripped, but a program's own options stay, so the rule matches them itself: ^make( -C [^ ]+)? +release for make -C dir release.
 6. **Keep-awake wrappers** (`caffeinate`, `systemd-inhibit`, and whatever the machine config adds), recognised by name as the program after stripping, refuse the job; the word as an argument (`rg caffeinate`) does not.
-7. **A shell as the program** (`sh -c`, `bash -c`, `zsh -c`) has its string run through the hook's spotter (below): the job takes the strictest class among the programs it finds, every slot any of them asks for, and their largest reservation; with none found, it is heavy.
+7. **A shell as the program** (`sh -c`, `bash -c`, `zsh -c`) has its string run through the hook's spotter (below); the shell's own options may come first, -o, -O, +o and --rcfile each with a value: the job takes the strictest class among the programs it finds, every slot any of them asks for, and their largest reservation; with none found, it is heavy.
 
 ### Checkers
 
