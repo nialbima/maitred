@@ -12,6 +12,7 @@ pub mod classes;
 mod config;
 mod decide;
 pub mod lifecycle;
+pub mod matching;
 mod resources;
 mod snapshot;
 #[cfg(test)]

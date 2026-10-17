@@ -18,6 +18,8 @@ maitred-scenario = { path = "crates/maitred-scenario" }
 maitred-sim = { path = "crates/maitred-sim" }
 # Class rules: linear-time patterns, so a pattern can't hang a supervisor.
 regex = "1.13.1"
+# Class rules: `env -S` splits its string with the shell's quoting rules, as the spotter will.
+shell-words = "1.1.1"
 # Test-only: property tests of decide, choose_victim and the spotter.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 

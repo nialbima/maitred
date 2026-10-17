@@ -267,7 +267,12 @@ fn checker(value: &str) -> Option<String> {
 
 /// Cores, to at most three decimal places, as millicores; more than zero.
 fn millicores(value: &str) -> Option<u64> {
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let (whole, fraction) = match value.split_once('.') {
+        // A bare trailing dot isn't a decimal place.
+        Some((_, "")) => return None,
+        Some(parts) => parts,
+        None => (value, ""),
+    };
     let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
     // `parse` alone would take a leading `+`; an empty part fails it anyway.
     if !digits(whole) || !digits(fraction) || fraction.len() > 3 {

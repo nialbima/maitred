@@ -254,6 +254,7 @@ fn an_options_bad_value_is_invalid() {
         ("cpu", "1.2345"),
         ("cpu", "two"),
         ("cpu", "+1"),
+        ("cpu", "1."),
         ("mem", "+3M"),
         ("mem", "0M"),
         ("mem", "3"),
