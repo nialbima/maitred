@@ -21,6 +21,7 @@ fn machine() -> Machine {
             vec!["ruby".into(), "-S".into()],
         ],
         keep_awake: vec!["amphetamine".into()],
+        root_commands: vec![],
     }
 }
 
@@ -65,7 +66,7 @@ fn leading_assignments_are_stripped() {
 fn each_wrapper_and_its_options_are_stripped_wherever_it_lives() {
     for argv in [
         &["env", "-i", "-u", "HOME", "FOO=1", "bin/x"][..],
-        &["/usr/bin/env", "--unset=HOME", "-C", "/tmp", "bin/x"],
+        &["/usr/bin/env", "--unset=HOME", "-v", "bin/x"],
         &["exec", "-a", "name", "bin/x"],
         &["command", "-p", "bin/x"],
         &["nohup", "bin/x"],
@@ -349,4 +350,56 @@ fn env_s_takes_its_string_attached_too() {
         command(&["env", "--split-string", "bin/x --fast"]),
         "bin/x --fast"
     );
+}
+
+// From Qualmaude's receipt on d29cefa.
+
+#[test]
+fn env_chdir_moves_the_directory_a_relative_program_is_resolved_from() {
+    for (argv, program) in [
+        (
+            &["env", "-C", "/elsewhere", "bin/x"][..],
+            "/elsewhere/bin/x",
+        ),
+        (&["env", "--chdir=/elsewhere", "bin/x"], "/elsewhere/bin/x"),
+        (
+            &["env", "--chdir", "/elsewhere", "bin/x"],
+            "/elsewhere/bin/x",
+        ),
+        (&["env", "-C", "sub", "bin/x"], "sub/bin/x"),
+        (&["env", "-Csub", "../bin/x"], "bin/x"),
+        (
+            &["env", "-C", "/elsewhere", "env", "-C", "deeper", "bin/x"],
+            "/elsewhere/deeper/bin/x",
+        ),
+    ] {
+        assert_eq!(command(argv), program, "{argv:?}");
+    }
+}
+
+#[test]
+fn a_rule_doesnt_class_a_program_env_ran_from_elsewhere() {
+    assert_eq!(
+        matched(
+            "x | ^bin/x( |$) | light | why",
+            &job(&["env", "-C", "/elsewhere", "bin/x"])
+        ),
+        "heavy"
+    );
+}
+
+#[test]
+fn command_with_v_anywhere_in_its_options_runs_nothing() {
+    for argv in [
+        &["command", "-pv", "bin/x"][..],
+        &["command", "-pV", "bin/x"],
+    ] {
+        assert_eq!(command(argv), argv.join(" "), "{argv:?}");
+    }
+}
+
+#[test]
+fn command_looks_up_only_when_an_option_says_so() {
+    assert_eq!(command(&["command", "bin/v"]), "bin/v");
+    assert_eq!(command(&["command", "--verbose", "bin/x"]), "bin/x");
 }

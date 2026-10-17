@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1ce084fa20e54c87dbacd791747464c3fa36af86f21f086769667279f4c53ff3 # shrinks to s = Script { text: "echo $(case $v in x|y) bin/a ;; esac)", programs: ["echo", "bin/a"] }
+cc e72dd32f9a28f90f63e787f92d4747e042de7853def749a9bd8a9601e357252f # shrinks to s = Script { text: "echo $(( bin/a ))", programs: ["echo", "bin/a"] }

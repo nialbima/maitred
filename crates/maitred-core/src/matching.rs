@@ -13,6 +13,9 @@ pub struct Machine {
     pub launchers: Vec<Vec<String>>,
     /// Programs that keep the machine awake, beside `caffeinate` and `systemd-inhibit`.
     pub keep_awake: Vec<String>,
+    /// Commands that print the project's root, beside `git rev-parse --show-toplevel`: the spotter
+    /// reads `$(repo-root)/bin/x` as `bin/x` from the root.
+    pub root_commands: Vec<String>,
 }
 
 /// The job as it was handed over.
@@ -37,21 +40,21 @@ pub enum Classified<'a> {
 }
 
 const KEEP_AWAKE: [&str; 2] = ["caffeinate", "systemd-inhibit"];
-const SHELLS: [&str; 3] = ["sh", "bash", "zsh"];
+pub(crate) const SHELLS: [&str; 3] = ["sh", "bash", "zsh"];
 
 /// Classifies a job's argv: steps 1 to 7 of Matching.
 #[must_use]
 pub fn classify<'a>(file: &'a ClassFile, job: &Job, machine: &Machine) -> Classified<'a> {
     // 1. Wrappers, repeatedly; 2. the program normalised; 3. launchers, then normalised again.
-    let mut words = strip_wrappers(job.argv.clone(), &machine.wrappers);
-    normalise_program(&mut words, job);
+    let (mut words, dir) = strip_wrappers(job.argv.clone(), &machine.wrappers, &job.cwd);
+    normalise_program(&mut words, &dir, &job.root);
     if let Some(launcher) = machine
         .launchers
         .iter()
         .find(|l| !l.is_empty() && words.starts_with(l))
     {
         words.drain(..launcher.len());
-        normalise_program(&mut words, job);
+        normalise_program(&mut words, &dir, &job.root);
     }
     let Some(program) = words.first() else {
         return Classified::NoRule {
@@ -87,26 +90,43 @@ pub fn classify<'a>(file: &'a ClassFile, job: &Job, machine: &Machine) -> Classi
     }
 }
 
-/// Strips leading assignments and wrappers, with their options, until neither is first.
-pub(crate) fn strip_wrappers(mut words: Vec<String>, extra: &[String]) -> Vec<String> {
+/// Strips leading assignments and wrappers, with their options, until neither is first. Also gives
+/// the directory the rest runs in: `cwd`, moved by any `env -C` on the way.
+pub(crate) fn strip_wrappers(
+    mut words: Vec<String>,
+    extra: &[String],
+    cwd: &str,
+) -> (Vec<String>, String) {
+    let mut dir = lexical(cwd);
     loop {
         let assignments = words.iter().take_while(|w| is_assignment(w)).count();
         words.drain(..assignments);
         let Some(first) = words.first() else {
-            return words;
+            return (words, dir);
         };
         let name = basename(first);
         let grammar = match grammar(name) {
             Some(grammar) => grammar,
             None if extra.iter().any(|e| e == name) => Grammar::NONE,
-            None => return words,
+            None => return (words, dir),
         };
-        // `command -v` and `-V` look a program up; they run nothing.
-        if name == "command" && words.get(1).is_some_and(|w| w == "-v" || w == "-V") {
-            return words;
+        // `command` with `v` or `V` among its options looks a program up; it runs nothing.
+        if name == "command" && looks_up(&words[1..]) {
+            return (words, dir);
         }
-        words = grammar.strip(&words);
+        let (rest, chdir) = grammar.strip(&words);
+        if let Some(chdir) = chdir {
+            dir = resolve(&dir, &chdir);
+        }
+        words = rest;
     }
+}
+
+/// Whether `command`'s options include `v` or `V`.
+fn looks_up(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|a| a.starts_with('-') && *a != "--")
+        .any(|a| !a.starts_with("--") && a.contains(['v', 'V']))
 }
 
 /// `NAME=value`, as a shell or `env` reads it.
@@ -145,9 +165,10 @@ impl Grammar {
 
     /// The words after this wrapper, its options and its own arguments. `env -S` splits its
     /// string into words ahead of the rest.
-    fn strip(self, words: &[String]) -> Vec<String> {
+    fn strip(self, words: &[String]) -> (Vec<String>, Option<String>) {
         let mut i = 1;
         let mut split = None;
+        let mut chdir = None;
         while let Some(word) = words.get(i) {
             if word == "--" {
                 i += 1;
@@ -175,8 +196,10 @@ impl Grammar {
                         .then(|| words.get(i + 1).map(String::as_str))
                         .flatten()
                 });
-                if key == "split-string" {
-                    split = value.map(str::to_owned);
+                match key {
+                    "split-string" => split = value.map(str::to_owned),
+                    "chdir" => chdir = value.map(str::to_owned),
+                    _ => {}
                 }
                 i += if attached.is_none() && self.long_with_value.contains(&key) {
                     2
@@ -195,8 +218,10 @@ impl Grammar {
                     } else {
                         Some(attached)
                     };
-                    if c == 'S' {
-                        split = value.map(str::to_owned);
+                    match c {
+                        'S' => split = value.map(str::to_owned),
+                        'C' => chdir = value.map(str::to_owned),
+                        _ => {}
                     }
                     break;
                 }
@@ -205,14 +230,15 @@ impl Grammar {
         }
         i += self.positional;
         let rest = words.get(i..).unwrap_or_default();
-        match split {
+        let words = match split {
             Some(string) => {
                 let mut expanded = shell_words::split(&string).unwrap_or_else(|_| vec![string]);
                 expanded.extend_from_slice(rest);
                 expanded
             }
             None => rest.to_vec(),
-        }
+        };
+        (words, chdir)
     }
 }
 
@@ -257,25 +283,30 @@ fn grammar(name: &str) -> Option<Grammar> {
     })
 }
 
-/// Rewrites a program path into the project relative to its root, so `./bin/x`, `bin/x` and its
+/// Rewrites a program path, resolved from `dir`, into the project relative to its root, so `./bin/x`, `bin/x` and its
 /// absolute path all read `bin/x`. A bare name, or a path outside the project, stays as it is.
-fn normalise_program(words: &mut [String], job: &Job) {
+fn normalise_program(words: &mut [String], dir: &str, root: &str) {
     let Some(program) = words.first_mut() else {
         return;
     };
     if !program.contains('/') {
         return;
     }
-    let absolute = if program.starts_with('/') {
-        lexical(program)
-    } else {
-        lexical(&format!("{}/{program}", job.cwd))
-    };
-    let root = lexical(&job.root);
+    let absolute = resolve(dir, program);
+    let root = lexical(root);
     *program = match absolute.strip_prefix(&format!("{root}/")) {
         Some(relative) => relative.to_owned(),
         None => absolute,
     };
+}
+
+/// `path` from `dir`, as an absolute path resolved by name.
+pub(crate) fn resolve(dir: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        lexical(path)
+    } else {
+        lexical(&format!("{dir}/{path}"))
+    }
 }
 
 /// An absolute path with `.` and `..` resolved by name, not by the file system.
@@ -293,14 +324,14 @@ fn lexical(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-fn basename(program: &str) -> &str {
+pub(crate) fn basename(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
 }
 
 /// The string a shell's `-c` runs: options come first (`-` or `+`, clustered, with `-o`, `-O` and
 /// `--rcfile` taking a value), one of them carries `c` (`-c`, `-lc`), and the first word after them
 /// is the string.
-fn shell_script(args: &[String]) -> Option<String> {
+pub(crate) fn shell_script(args: &[String]) -> Option<String> {
     let mut dash_c = false;
     let mut i = 0;
     while let Some(arg) = args.get(i) {

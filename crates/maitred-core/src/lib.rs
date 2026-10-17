@@ -15,6 +15,7 @@ pub mod lifecycle;
 pub mod matching;
 mod resources;
 mod snapshot;
+pub mod spotter;
 #[cfg(test)]
 mod testgen;
 mod ticket;
