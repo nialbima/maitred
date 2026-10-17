@@ -20,6 +20,12 @@ maitred-sim = { path = "crates/maitred-sim" }
 regex = "1.13.1"
 # Class rules: `env -S` splits its string with the shell's quoting rules, as the spotter will.
 shell-words = "1.1.1"
+# Every JSON file, and OTLP's JSON shape.
+serde = { version = "1.0.229", features = ["derive"] }
+# float_roundtrip: a figure reads back as exactly the figure written.
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+# Test-only: the OTLP types are checked against the protocol's own.
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "metrics", "with-serde"] }
 # Test-only: property tests of decide, choose_victim and the spotter.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 

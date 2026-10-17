@@ -13,6 +13,7 @@ mod config;
 mod decide;
 pub mod lifecycle;
 pub mod matching;
+pub mod otel;
 mod resources;
 mod snapshot;
 pub mod spotter;
