@@ -46,7 +46,7 @@ pub struct Gauge {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "RawPoint")]
 pub struct NumberDataPoint {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributes: Vec<KeyValue>,
@@ -58,10 +58,10 @@ pub struct NumberDataPoint {
 }
 
 /// A point's value: `asDouble`, or `asInt` written as a string.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Number {
     #[serde(rename = "asDouble")]
-    Double(f64),
+    Double(Finite),
     #[serde(rename = "asInt", with = "as_string")]
     Int(i64),
 }
@@ -82,7 +82,72 @@ pub enum AnyValue {
     #[serde(rename = "intValue", with = "as_string")]
     Int(i64),
     #[serde(rename = "doubleValue")]
-    Double(f64),
+    Double(Finite),
+}
+
+/// A double that is a number: JSON has no NaN or infinity, and a figure the sampler got by dividing
+/// by zero is one it couldn't take, which it leaves out rather than writing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(into = "f64", try_from = "f64")]
+pub struct Finite(f64);
+
+impl Finite {
+    /// The value, unless it is NaN or infinite.
+    #[must_use]
+    pub fn new(value: f64) -> Option<Self> {
+        value.is_finite().then_some(Self(value))
+    }
+
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl From<Finite> for f64 {
+    fn from(finite: Finite) -> Self {
+        finite.0
+    }
+}
+
+impl TryFrom<f64> for Finite {
+    type Error = &'static str;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or("a double must be finite")
+    }
+}
+
+/// A point as read: OTLP's value is a oneof, so a point with both values or neither is refused.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPoint {
+    #[serde(default)]
+    attributes: Vec<KeyValue>,
+    #[serde(with = "as_string")]
+    time_unix_nano: u64,
+    as_double: Option<Finite>,
+    as_int: Option<Int>,
+}
+
+#[derive(Deserialize)]
+struct Int(#[serde(with = "as_string")] i64);
+
+impl TryFrom<RawPoint> for NumberDataPoint {
+    type Error = &'static str;
+
+    fn try_from(raw: RawPoint) -> Result<Self, Self::Error> {
+        let value = match (raw.as_double, raw.as_int) {
+            (Some(double), None) => Number::Double(double),
+            (None, Some(Int(int))) => Number::Int(int),
+            _ => return Err("a point has exactly one of asDouble and asInt"),
+        };
+        Ok(Self {
+            attributes: raw.attributes,
+            time_unix_nano: raw.time_unix_nano,
+            value,
+        })
+    }
 }
 
 impl ResourceMetrics {
@@ -106,8 +171,8 @@ impl ResourceMetrics {
     /// The history's line for it, without the newline.
     #[must_use]
     pub fn to_line(&self) -> String {
-        // Every field is a string, a number or a bool, and every map key a string, so this can't
-        // fail; an f64 that isn't finite is written as null rather than failing.
+        // Every field is a string, a finite number or a bool, and every map key a string, so this
+        // can't fail.
         serde_json::to_string(self).unwrap_or_default()
     }
 
@@ -184,7 +249,8 @@ impl KeyValue {
     }
 }
 
-/// A 64-bit integer written as a decimal string, and read from one or from a number.
+/// A 64-bit integer written as a decimal string, and read from one (with no leading `+`, as
+/// proto3's JSON mapping requires) or from a number.
 mod as_string {
     use std::fmt::Display;
     use std::str::FromStr;
@@ -197,19 +263,26 @@ mod as_string {
 
     pub(super) fn deserialize<'de, T, D>(d: D) -> Result<T, D::Error>
     where
-        T: FromStr + TryFrom<i128>,
+        T: FromStr + TryFrom<u64> + TryFrom<i64>,
         T::Err: Display,
         D: Deserializer<'de>,
     {
+        // An untagged enum reads through serde's buffered content, which has no i128: one arm per
+        // width it does have.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Either {
             String(String),
-            Number(i128),
+            Unsigned(u64),
+            Signed(i64),
         }
         match Either::deserialize(d)? {
+            Either::String(s) if s.starts_with('+') => {
+                Err(Error::custom("a leading + isn't allowed"))
+            }
             Either::String(s) => s.parse().map_err(Error::custom),
-            Either::Number(n) => T::try_from(n).map_err(|_| Error::custom("out of range")),
+            Either::Unsigned(n) => T::try_from(n).map_err(|_| Error::custom("out of range")),
+            Either::Signed(n) => T::try_from(n).map_err(|_| Error::custom("out of range")),
         }
     }
 }

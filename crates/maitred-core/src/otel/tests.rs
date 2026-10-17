@@ -9,6 +9,10 @@ use proptest::prelude::*;
 
 use super::*;
 
+fn finite(value: f64) -> Finite {
+    Finite::new(value).unwrap()
+}
+
 fn sample() -> ResourceMetrics {
     ResourceMetrics::new(
         vec![
@@ -23,7 +27,7 @@ fn sample() -> ResourceMetrics {
                 "1",
                 vec![NumberDataPoint::new(
                     1_760_000_000_123_000_000,
-                    Number::Double(0.42),
+                    Number::Double(finite(0.42)),
                 )],
             ),
             Metric::gauge(
@@ -132,19 +136,132 @@ fn our_types_read_their_own_line_back() {
     assert_eq!(ResourceMetrics::from_line(&ours.to_line()).unwrap(), ours);
 }
 
+/// A line with `"timeUnixNano":<time>` and the point's value `<value>`, its one attribute `<attr>`.
+fn point_line(time: &str, value: &str, attr: &str) -> String {
+    format!(
+        r#"{{"resource":{{"attributes":[]}},"scopeMetrics":[{{"scope":{{"name":"maitred","version":"0"}},"metrics":[{{"name":"m","unit":"1","gauge":{{"dataPoints":[{{"attributes":[{{"key":"k","value":{attr}}}],"timeUnixNano":{time},{value}}}]}}}}]}}]}}"#
+    )
+}
+
+fn the_point(line: &str) -> Result<NumberDataPoint, serde_json::Error> {
+    ResourceMetrics::from_line(line)
+        .map(|r| r.scope_metrics[0].metrics[0].gauge.data_points[0].clone())
+}
+
+#[test]
+fn sixty_four_bit_integers_are_read_as_numbers_too() {
+    let point = the_point(&point_line("1", r#""asInt":5"#, r#"{"intValue":-7}"#)).unwrap();
+
+    assert_eq!(point.time_unix_nano, 1);
+    assert_eq!(point.value, Number::Int(5));
+    assert_eq!(point.attributes[0].value, AnyValue::Int(-7));
+}
+
+#[test]
+fn an_integer_out_of_range_is_refused() {
+    assert!(
+        the_point(&point_line(
+            r#""1""#,
+            r#""asInt":"5""#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_ok()
+    );
+    assert!(the_point(&point_line("-1", r#""asInt":5"#, r#"{"stringValue":"v"}"#)).is_err());
+    assert!(
+        the_point(&point_line(
+            r#""1""#,
+            r#""asInt":9223372036854775808"#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn an_integer_string_with_a_plus_sign_is_refused() {
+    // proto3's JSON mapping allows no leading `+`.
+    assert!(
+        the_point(&point_line(
+            r#""1""#,
+            r#""asInt":"+5""#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_err()
+    );
+    assert!(
+        the_point(&point_line(
+            r#""+1""#,
+            r#""asInt":"5""#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn a_point_with_both_values_or_neither_is_refused() {
+    // OTLP's value is a oneof.
+    assert!(
+        the_point(&point_line(
+            r#""1""#,
+            r#""asDouble":2.5,"asInt":"5""#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_err()
+    );
+    assert!(
+        the_point(&point_line(
+            r#""1""#,
+            r#""asInt":"5","asDouble":2.5"#,
+            r#"{"stringValue":"v"}"#
+        ))
+        .is_err()
+    );
+    let neither = point_line(r#""1""#, r#""x":0"#, r#"{"stringValue":"v"}"#);
+    assert!(the_point(&neither).is_err());
+}
+
+#[test]
+fn a_reading_that_isnt_a_number_cant_be_made() {
+    // A zero denominator in the sampler is a figure that couldn't be taken (ARCHITECTURE, History
+    // and OpenTelemetry), so it never reaches a line.
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(Finite::new(value), None, "{value}");
+    }
+    assert_eq!(Finite::new(-0.5).map(Finite::get), Some(-0.5));
+}
+
+#[test]
+fn every_double_written_reads_back_as_written() {
+    for value in [0.0, -0.0, f64::MIN_POSITIVE, f64::MAX, f64::MIN, 0.1 + 0.2] {
+        let point = NumberDataPoint::new(1, Number::Double(finite(value)));
+        let line =
+            ResourceMetrics::new(vec![], "0", vec![Metric::gauge("m", "1", vec![point])]).to_line();
+        let Number::Double(read) = the_point(&line).unwrap().value else {
+            panic!("{line}")
+        };
+        assert_eq!(read.get().to_bits(), value.to_bits(), "{line}");
+    }
+}
+
 fn any_value() -> impl Strategy<Value = AnyValue> {
     prop_oneof![
         any::<String>().prop_map(AnyValue::String),
         any::<bool>().prop_map(AnyValue::Bool),
         any::<i64>().prop_map(AnyValue::Int),
-        (-1e15..1e15f64).prop_map(AnyValue::Double),
+        any::<f64>()
+            .prop_filter_map("finite", Finite::new)
+            .prop_map(AnyValue::Double),
     ]
 }
 
 fn number() -> impl Strategy<Value = Number> {
     prop_oneof![
         any::<i64>().prop_map(Number::Int),
-        (-1e15..1e15f64).prop_map(Number::Double),
+        any::<f64>()
+            .prop_filter_map("finite", Finite::new)
+            .prop_map(Number::Double),
     ]
 }
 
@@ -172,7 +289,7 @@ proptest! {
         // As above: opentelemetry-proto reads asInt only as a number, so only a double is
         // compared through it.
         if let Number::Double(d) = value {
-            prop_assert_eq!(g.data_points[0].value, Some(ProtoNumber::AsDouble(d)));
+            prop_assert_eq!(g.data_points[0].value, Some(ProtoNumber::AsDouble(d.get())));
         }
 
     }

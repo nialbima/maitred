@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 213, 2026-10-16):
+  Synced from the maitred architecture doc on claude.ai (rev 216, 2026-10-17):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -427,7 +427,7 @@ Each admission pass, after deciding, spends at most a few milliseconds removing 
 
 ### History and OpenTelemetry
 
-Each sample becomes metric data points in OTLP's JSON shape, one `ResourceMetrics` object per line, so `maitred export` mostly concatenates. Names follow the OTel semantic conventions where one exists and use `maitred.` where none does.
+Each sample becomes metric data points in OTLP's JSON shape, one `ResourceMetrics` object per line, so `maitred export` mostly concatenates. Names follow the OTel semantic conventions where one exists and use `maitred.` where none does. A figure the sampler couldn't take, whether a reading failed or a ratio's interval or core count came out zero, has no data point rather than one that isn't a number: OTLP/JSON has no NaN, and a gauge with no reading has no point (Nick, 2026-10-17).
 
 | Reading | Metric | Unit | Attributes |
 | --- | --- | --- | --- |
