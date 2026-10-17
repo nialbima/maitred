@@ -416,3 +416,178 @@ fn a_here_strings_word_is_not_a_program() {
 fn and_redirection_late_in_a_long_command_leaves_the_next_one() {
     assert_eq!(programs("abcdefgh &> o; z"), ["abcdefgh", "z"]);
 }
+
+// Qualmaude's receipt on e432b6e.
+
+#[test]
+fn a_function_defined_without_parentheses_runs_its_body() {
+    assert_eq!(programs("function f { bin/x; }; bin/y"), ["bin/x", "bin/y"]);
+    assert_eq!(
+        programs("a; function f { bin/x; }; bin/y"),
+        ["a", "bin/x", "bin/y"]
+    );
+    assert_eq!(programs("function f ( bin/x )"), ["bin/x"]);
+    assert_eq!(programs("function f() { bin/x; }"), ["bin/x"]);
+}
+
+#[test]
+fn coproc_runs_its_command() {
+    assert_eq!(programs("coproc bin/x run"), ["bin/x"]);
+    assert_eq!(programs("coproc job { bin/x; }"), ["bin/x"]);
+}
+
+#[test]
+fn popd_returns_to_the_directory_pushd_left() {
+    assert_eq!(
+        programs_in("pushd sub; popd; bin/x").last().unwrap(),
+        &("bin/x".into(), "/work/app".into())
+    );
+    assert_eq!(
+        programs_in("pushd a; pushd /b; popd; bin/x")
+            .last()
+            .unwrap(),
+        &("bin/x".into(), "/work/app/a".into())
+    );
+}
+
+#[test]
+fn popd_with_nothing_pushed_leaves_the_directory_be() {
+    assert_eq!(
+        programs_in("cd sub; popd; bin/x").last().unwrap(),
+        &("bin/x".into(), "/work/app/sub".into())
+    );
+}
+
+#[test]
+fn a_subshells_pushd_ends_with_the_subshell() {
+    assert_eq!(
+        programs_in("pushd a; (popd); popd; bin/x").last().unwrap(),
+        &("bin/x".into(), "/work/app".into())
+    );
+}
+
+#[test]
+fn a_rooted_path_is_normalised_and_one_leaving_the_project_is_not_rooted() {
+    let inside = spot("$(repo-root)/lib/../bin/x", CWD, &machine());
+    assert!(inside[0].rooted);
+    assert_eq!(inside[0].program, "bin/x");
+
+    let outside = spot("$(repo-root)/../other/bin/x", CWD, &machine());
+    assert!(!outside[0].rooted, "{outside:?}");
+    assert_eq!(outside[0].program, "$(repo-root)/../other/bin/x");
+}
+
+// A heredoc a shell reads as its script (Nick, 2026-10-17).
+
+#[test]
+fn a_heredoc_fed_to_a_shell_is_spotted_as_its_script() {
+    assert_eq!(
+        programs("bash <<'EOF'\nbin/x run\ncd sub && bin/y\nEOF\nbin/z"),
+        ["bash", "bin/x", "cd", "bin/y", "bin/z"]
+    );
+    assert_eq!(
+        programs("sh -e <<EOF\nbin/x $(bin/y)\nEOF"),
+        ["sh", "bin/x", "bin/y"]
+    );
+    assert_eq!(
+        programs("zsh -s arg <<-EOF\n\tbin/x\n\tEOF"),
+        ["zsh", "bin/x"]
+    );
+}
+
+#[test]
+fn a_heredoc_feeding_a_shells_script_file_or_dash_c_is_its_input_only() {
+    assert_eq!(programs("bash run.sh <<'EOF'\nbin/x\nEOF"), ["bash"]);
+    assert_eq!(
+        programs("bash -c 'bin/y' <<'EOF'\nbin/x\nEOF"),
+        ["bash", "bin/y"]
+    );
+}
+
+#[test]
+fn a_heredoc_belongs_to_the_command_it_follows_not_the_next_one() {
+    assert_eq!(programs("cat <<EOF; bash\nbin/x\nEOF"), ["cat", "bash"]);
+    assert_eq!(
+        programs("bash <<A; cat <<B\nbin/x\nA\nbin/y\nB"),
+        ["bash", "bin/x", "cat"]
+    );
+}
+
+#[test]
+fn a_heredoc_script_starts_in_the_directory_of_its_shell() {
+    assert_eq!(
+        programs_in("cd /elsewhere; bash <<'EOF'\nbin/x\nEOF")
+            .last()
+            .unwrap(),
+        &("bin/x".into(), "/elsewhere".into())
+    );
+}
+
+#[test]
+fn the_suggestion_wraps_the_shell_reading_a_heredoc() {
+    assert_eq!(
+        suggestion("bash <<'EOF'\nbin/mutant run\nEOF", "bin/mutant", None),
+        "maitred -- bash <<'EOF'\nbin/mutant run\nEOF"
+    );
+}
+
+#[test]
+fn only_a_heredoc_on_stdin_is_a_shells_script() {
+    assert_eq!(programs("bash 3<<'EOF'\nbin/x\nEOF"), ["bash"]);
+    assert_eq!(programs("bash 0<<'EOF'\nbin/x\nEOF"), ["bash", "bin/x"]);
+}
+
+// Mutants.
+
+#[test]
+fn a_here_strings_substitution_is_spotted_wherever_it_falls() {
+    assert_eq!(programs("a; cat <<< \"$(bin/x)\""), ["a", "cat", "bin/x"]);
+}
+
+#[test]
+fn a_heredoc_with_no_delimiter_line_runs_to_the_end() {
+    assert_eq!(programs("bash <<EOF\nbin/x\n"), ["bash", "bin/x"]);
+}
+
+#[test]
+fn an_escaped_dollar_in_a_heredoc_starts_no_substitution() {
+    assert_eq!(
+        programs("cat <<EOF\n\\$(bin/x) $(bin/y)\nEOF"),
+        ["cat", "bin/y"]
+    );
+}
+
+#[test]
+fn backquotes_in_a_heredoc_pair_up_and_start_where_they_stand() {
+    assert_eq!(
+        programs("cat <<EOF\n`bin/x` `bin/y` x`bin/z`\nEOF"),
+        ["cat", "bin/x", "bin/y", "bin/z"]
+    );
+}
+
+#[test]
+fn the_suggestion_replaces_a_substitution_in_a_heredoc_where_it_stands() {
+    assert_eq!(
+        suggestion("cat <<EOF\n$(bin/mutant run)\nEOF", "bin/mutant", None),
+        "cat <<EOF\n$(maitred -- bin/mutant run)\nEOF"
+    );
+}
+
+#[test]
+fn the_suggestion_finds_assignments_after_the_start_of_the_string() {
+    assert_eq!(
+        suggestion("a; FOO=1 bin/mutant run", "bin/mutant", None),
+        "a; maitred -- env FOO=1 bin/mutant run"
+    );
+}
+
+#[test]
+fn a_shell_with_options_and_a_script_file_reads_no_heredoc_as_its_script() {
+    assert_eq!(programs("bash -e run.sh <<'EOF'\nbin/x\nEOF"), ["bash"]);
+}
+
+#[test]
+fn eval_is_spotted_and_its_script_is_not() {
+    // The hook notes it to the agent rather than reading the script (Nick, 2026-10-17).
+    assert_eq!(programs("eval 'bin/x run'; eval bin/y"), ["eval", "eval"]);
+}

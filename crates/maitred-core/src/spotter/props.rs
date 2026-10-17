@@ -142,6 +142,14 @@ proptest! {
         prop_assert_eq!(spotted(&format!("bash -c '{}'", s.text)), expected);
     }
 
+    /// A heredoc a shell reads on stdin is spotted as if it were the script itself.
+    #[test]
+    fn a_heredoc_on_a_shells_stdin_is_spotted_as_its_script(s in script()) {
+        let mut expected = vec!["bash".to_owned()];
+        expected.extend(s.programs);
+        prop_assert_eq!(spotted(&format!("bash <<'EOF'\n{}\nEOF", s.text)), expected);
+    }
+
     /// Every simple command's span is a piece of the script that starts at a word.
     #[test]
     fn every_span_is_inside_the_script(s in script()) {

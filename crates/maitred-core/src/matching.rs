@@ -332,7 +332,20 @@ pub(crate) fn basename(program: &str) -> &str {
 /// `--rcfile` taking a value), one of them carries `c` (`-c`, `-lc`), and the first word after them
 /// is the string.
 pub(crate) fn shell_script(args: &[String]) -> Option<String> {
+    let (dash_c, _, operands) = shell_options(args);
+    dash_c.then(|| args.get(operands).cloned()).flatten()
+}
+
+/// A shell reads its script from stdin: no `-c` string, and `-s` or no script file.
+pub(crate) fn reads_stdin(args: &[String]) -> bool {
+    let (dash_c, dash_s, operands) = shell_options(args);
+    !dash_c && (dash_s || operands >= args.len())
+}
+
+/// A shell's options: whether they include `-c` and `-s`, and where its operands start.
+fn shell_options(args: &[String]) -> (bool, bool, usize) {
     let mut dash_c = false;
+    let mut dash_s = false;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         i += 1;
@@ -350,11 +363,12 @@ pub(crate) fn shell_script(args: &[String]) -> Option<String> {
             break;
         };
         dash_c |= arg.starts_with('-') && flags.contains('c');
+        dash_s |= arg.starts_with('-') && flags.contains('s');
         if flags.contains(['o', 'O']) {
             i += 1;
         }
     }
-    dash_c.then(|| args.get(i).cloned()).flatten()
+    (dash_c, dash_s, i)
 }
 
 /// The argv joined with single spaces, quoting any argument that contains whitespace or quotes.

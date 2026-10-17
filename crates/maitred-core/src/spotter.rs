@@ -4,7 +4,9 @@
 
 use std::ops::Range;
 
-use crate::matching::{Machine, SHELLS, basename, resolve, shell_script, strip_wrappers};
+use crate::matching::{
+    Machine, SHELLS, basename, reads_stdin, resolve, shell_script, strip_wrappers,
+};
 
 /// One program the string runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +33,7 @@ pub fn spot(script: &str, cwd: &str, machine: &Machine) -> Vec<Spotted> {
         machine,
         found: &mut found,
     }
-    .list(script, 0, resolve("/", cwd), None);
+    .list(script, 0, Place::new(resolve("/", cwd)), None);
     found
 }
 
@@ -88,14 +90,29 @@ enum Op {
 enum Token {
     Word(Word),
     Op(Op),
-    /// Substitutions to spot that belong to no word: a redirection's target, a heredoc's body.
+    /// Substitutions to spot that belong to no word: a redirection's target.
     Substitutions(Vec<Range<usize>>),
+    /// A heredoc, where its `<<` falls among the command's words; its body is filled in once the
+    /// lexer reaches it.
+    Heredoc(Body),
+}
+
+/// A heredoc's body, the shell's stdin when it names no other descriptor; or a redirection's
+/// substitutions alone, with no body.
+#[derive(Debug, Clone, Default)]
+struct Body {
+    span: Range<usize>,
+    stdin: bool,
+    /// Its substitutions, when its delimiter wasn't quoted.
+    substitutions: Vec<Range<usize>>,
 }
 
 struct Heredoc {
     delimiter: String,
     quoted: bool,
     strip_tabs: bool,
+    /// The index of its `Token::Heredoc`.
+    token: usize,
 }
 
 fn lex(s: &str) -> Vec<Token> {
@@ -111,9 +128,10 @@ fn lex(s: &str) -> Vec<Token> {
                 tokens.push(Token::Op(Op::Separator));
                 i += 1;
                 for heredoc in heredocs.drain(..) {
-                    let (end, substitutions) = heredoc_body(s, i, &heredoc);
-                    if !substitutions.is_empty() {
-                        tokens.push(Token::Substitutions(substitutions));
+                    let (end, span, substitutions) = heredoc_body(s, i, &heredoc);
+                    if let Token::Heredoc(body) = &mut tokens[heredoc.token] {
+                        body.span = span;
+                        body.substitutions = substitutions;
                     }
                     i = end;
                 }
@@ -149,11 +167,13 @@ fn lex(s: &str) -> Vec<Token> {
             }
             b'<' | b'>' => {
                 // A word of digits just before is the descriptor, not a word.
+                let mut descriptor = None;
                 if let Some(Token::Word(w)) = tokens.last()
                     && w.span.end == i
                     && w.plain
                     && w.text.bytes().all(|c| c.is_ascii_digit())
                 {
+                    descriptor = Some(w.text.clone());
                     tokens.pop();
                 }
                 if s[i..].starts_with("<<<") {
@@ -170,7 +190,12 @@ fn lex(s: &str) -> Vec<Token> {
                         delimiter: word.text,
                         quoted: raw.contains(['\'', '"', '\\']),
                         strip_tabs,
+                        token: tokens.len(),
                     });
+                    tokens.push(Token::Heredoc(Body {
+                        stdin: descriptor.is_none_or(|d| d.parse() == Ok(0)),
+                        ..Body::default()
+                    }));
                     i = end;
                 } else {
                     let len = match (bytes[i], bytes.get(i + 1)) {
@@ -206,9 +231,13 @@ fn redirect_target(s: &str, mut i: usize, tokens: &mut Vec<Token>) -> usize {
     end
 }
 
-/// A heredoc's body, from `start` to just after its delimiter's line, and the substitutions in it
-/// when its delimiter wasn't quoted.
-fn heredoc_body(s: &str, start: usize, heredoc: &Heredoc) -> (usize, Vec<Range<usize>>) {
+/// A heredoc's body from `start`: where its delimiter's line ends, the body itself, and the
+/// substitutions in it when its delimiter wasn't quoted.
+fn heredoc_body(
+    s: &str,
+    start: usize,
+    heredoc: &Heredoc,
+) -> (usize, Range<usize>, Vec<Range<usize>>) {
     let mut substitutions = Vec::new();
     let mut i = start;
     while i < s.len() {
@@ -221,7 +250,7 @@ fn heredoc_body(s: &str, start: usize, heredoc: &Heredoc) -> (usize, Vec<Range<u
         };
         let next = (line_end + 1).min(s.len());
         if line == heredoc.delimiter {
-            return (next, substitutions);
+            return (next, start..i, substitutions);
         }
         if !heredoc.quoted {
             let mut j = i;
@@ -231,7 +260,8 @@ fn heredoc_body(s: &str, start: usize, heredoc: &Heredoc) -> (usize, Vec<Range<u
                     b'$' if s[j..].starts_with("$(") => {
                         let close = closing_paren(s, j + 2);
                         substitutions.push(j + 2..close);
-                        j = close + 1;
+                        // The `)` itself is stepped over below.
+                        j = close;
                     }
                     b'`' => {
                         let close = closing_backquote(s, j + 1);
@@ -244,7 +274,7 @@ fn heredoc_body(s: &str, start: usize, heredoc: &Heredoc) -> (usize, Vec<Range<u
         }
         i = next;
     }
-    (s.len(), substitutions)
+    (s.len(), start..s.len(), substitutions)
 }
 
 /// One word from `start`, and where it ends.
@@ -448,6 +478,47 @@ struct Spotter<'m, 'f> {
     found: &'f mut Vec<Spotted>,
 }
 
+/// Where the shell is, as far as the spotter can follow it: its directory and the ones `pushd`
+/// left for `popd`.
+#[derive(Clone)]
+struct Place {
+    dir: String,
+    pushed: Vec<String>,
+}
+
+impl Place {
+    fn new(dir: String) -> Self {
+        Self {
+            dir,
+            pushed: Vec::new(),
+        }
+    }
+
+    /// Follows a literal cd, pushd or popd; one it can't read leaves the directory be.
+    fn follow(&mut self, name: &str, words: &[Word], stripped: &[String], runs_in: &str) {
+        match name {
+            "cd" | "pushd" if stripped.len() >= 2 => {
+                if name == "pushd" {
+                    self.pushed.push(self.dir.clone());
+                }
+                let arg_at = words.len() - stripped.len() + 1;
+                if let Some(arg) = words
+                    .get(arg_at)
+                    .filter(|a| a.plain && !a.text.is_empty() && !a.text.starts_with('-'))
+                {
+                    self.dir = resolve(runs_in, &arg.text);
+                }
+            }
+            "popd" if stripped.len() == 1 => {
+                if let Some(dir) = self.pushed.pop() {
+                    self.dir = dir;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Command,
@@ -457,10 +528,12 @@ enum Mode {
 
 impl Spotter<'_, '_> {
     /// Spots a list read from `s`, whose byte 0 is `base` in the string being refused. `wrap` is
-    /// the shell command whose `-c` string `s` is, if it is one.
-    fn list(&mut self, s: &str, base: usize, mut dir: String, wrap: Option<&Spotted>) {
-        let mut dirs: Vec<String> = Vec::new();
+    /// the shell command whose script `s` is, if it is one.
+    fn list(&mut self, s: &str, base: usize, mut place: Place, wrap: Option<&Spotted>) {
+        // A subshell's place ends with it.
+        let mut outer: Vec<Place> = Vec::new();
         let mut words: Vec<Word> = Vec::new();
+        let mut bodies: Vec<Body> = Vec::new();
         let mut mode = Mode::Command;
         for token in lex(s) {
             match (mode, token) {
@@ -471,22 +544,34 @@ impl Spotter<'_, '_> {
                 }
                 (Mode::Pattern, Token::Op(Op::Close)) => mode = Mode::Command,
                 (Mode::Pattern, Token::Op(_)) => {}
-                (_, Token::Substitutions(subs)) => {
+                (Mode::Pattern, Token::Substitutions(subs)) => {
                     for sub in subs {
-                        self.list(&s[sub.clone()], base + sub.start, dir.clone(), wrap);
+                        self.list(&s[sub.clone()], base + sub.start, place.clone(), wrap);
                     }
                 }
+                // A redirection's substitutions run with its command, so they come after its
+                // program, as a heredoc's do.
+                (Mode::Command, Token::Substitutions(substitutions)) => bodies.push(Body {
+                    substitutions,
+                    ..Body::default()
+                }),
+                (Mode::Pattern, Token::Heredoc(body)) => {
+                    self.bodies(s, base, &place, &[body], None, wrap);
+                }
+                (Mode::Command, Token::Heredoc(body)) => bodies.push(body),
                 (Mode::Command, Token::Word(w)) => words.push(w),
                 (Mode::Command, Token::Op(op)) => {
-                    if self.command(s, base, &mut dir, &std::mem::take(&mut words), wrap) {
+                    let words = std::mem::take(&mut words);
+                    let bodies = std::mem::take(&mut bodies);
+                    if self.command(s, base, &mut place, &words, &bodies, wrap) {
                         mode = Mode::Pattern;
                         continue;
                     }
                     match op {
-                        Op::Open => dirs.push(dir.clone()),
+                        Op::Open => outer.push(place.clone()),
                         Op::Close => {
-                            if let Some(outer) = dirs.pop() {
-                                dir = outer;
+                            if let Some(before) = outer.pop() {
+                                place = before;
                             }
                         }
                         Op::CaseEnd => mode = Mode::Pattern,
@@ -496,33 +581,77 @@ impl Spotter<'_, '_> {
             }
         }
         if mode == Mode::Command {
-            self.command(s, base, &mut dir, &words, wrap);
+            self.command(s, base, &mut place, &words, &bodies, wrap);
         }
     }
 
-    /// Spots one simple command. True when it opens a `case`, whose patterns come next.
+    /// Spots one simple command and the heredocs it reads. True when it opens a `case`, whose
+    /// patterns come next.
     fn command(
         &mut self,
         s: &str,
         base: usize,
-        dir: &mut String,
+        place: &mut Place,
         words: &[Word],
+        bodies: &[Body],
         wrap: Option<&Spotted>,
     ) -> bool {
+        let (opens_case, script) = self.simple(s, base, place, words, bodies, wrap);
+        self.bodies(s, base, place, bodies, script, wrap);
+        opens_case
+    }
+
+    /// The substitutions in each heredoc but `script`, the one a shell reads as its script.
+    fn bodies(
+        &mut self,
+        s: &str,
+        base: usize,
+        place: &Place,
+        bodies: &[Body],
+        script: Option<usize>,
+        wrap: Option<&Spotted>,
+    ) {
+        for (at, body) in bodies.iter().enumerate() {
+            if Some(at) != script {
+                for sub in &body.substitutions {
+                    self.list(&s[sub.clone()], base + sub.start, place.clone(), wrap);
+                }
+            }
+        }
+    }
+
+    /// Spots one simple command: true when it opens a `case`, and the heredoc a shell reads as
+    /// its script, if one does.
+    fn simple(
+        &mut self,
+        s: &str,
+        base: usize,
+        place: &mut Place,
+        words: &[Word],
+        bodies: &[Body],
+        wrap: Option<&Spotted>,
+    ) -> (bool, Option<usize>) {
         let mut words = words;
         // Keywords before the command.
         while let Some(first) = words.first().filter(|w| w.plain) {
             let keyword = first.text.as_str();
             if keyword == "case" {
-                self.substitutions(s, base, dir, words, wrap);
-                return true;
+                self.substitutions(s, base, place, words, wrap);
+                return (true, None);
             }
-            if matches!(keyword, "for" | "select" | "function") || CLOSES.contains(&keyword) {
-                self.substitutions(s, base, dir, words, wrap);
-                return false;
+            if matches!(keyword, "for" | "select") || CLOSES.contains(&keyword) {
+                self.substitutions(s, base, place, words, wrap);
+                return (false, None);
             }
             if keyword == "repeat" {
                 words = words.get(2..).unwrap_or_default();
+            } else if keyword == "function" {
+                // Its name; the body that follows is a group or a subshell.
+                words = words.get(2..).unwrap_or_default();
+            } else if keyword == "coproc" {
+                // `coproc NAME { … }` names it; `coproc command` doesn't.
+                let named = words.get(2).is_some_and(|w| w.text == "{");
+                words = &words[if named { 2 } else { 1 }..];
             } else if keyword == "time" && words.get(1).is_some_and(|w| w.text == "-p") {
                 words = &words[2..];
             } else if LEADS.contains(&keyword) {
@@ -532,7 +661,7 @@ impl Spotter<'_, '_> {
             }
         }
         let (Some(first), Some(last)) = (words.first(), words.last()) else {
-            return false;
+            return (false, None);
         };
         let assignments: Vec<&Word> = words
             .iter()
@@ -542,7 +671,7 @@ impl Spotter<'_, '_> {
             .iter()
             .map(|w| w.text.clone())
             .collect();
-        let (mut stripped, runs_in) = strip_wrappers(texts, &self.machine.wrappers, dir);
+        let (mut stripped, runs_in) = strip_wrappers(texts, &self.machine.wrappers, &place.dir);
         if let Some(launcher) = self
             .machine
             .launchers
@@ -551,6 +680,7 @@ impl Spotter<'_, '_> {
         {
             stripped.drain(..launcher.len());
         }
+        let mut script = None;
         if let Some(program) = stripped.first() {
             let from_root = self.path_from_root(program);
             let spotted = Spotted {
@@ -572,29 +702,33 @@ impl Spotter<'_, '_> {
             };
             let name = basename(program);
             self.found.push(spotted.clone());
-            // A literal cd or pushd moves later commands; one it can't read leaves them be.
-            if matches!(name, "cd" | "pushd") && stripped.len() >= 2 {
-                let arg_at = words.len() - stripped.len() + 1;
-                if let Some(arg) = words
-                    .get(arg_at)
-                    .filter(|a| a.plain && !a.text.is_empty() && !a.text.starts_with('-'))
+            place.follow(name, words, &stripped, &runs_in);
+            // A shell's script, recursively, in the shell's directory: its -c string, or the
+            // heredoc it reads on stdin.
+            let outer = wrap.cloned().unwrap_or(spotted);
+            if SHELLS.contains(&name) {
+                if let Some(string) = shell_script(&stripped[1..]) {
+                    self.list(&string, 0, Place::new(runs_in), Some(&outer));
+                } else if reads_stdin(&stripped[1..])
+                    && let Some(at) = bodies.iter().rposition(|b| b.stdin)
                 {
-                    *dir = resolve(&runs_in, &arg.text);
+                    let body = bodies[at].span.clone();
+                    self.list(
+                        &s[body.clone()],
+                        base + body.start,
+                        Place::new(runs_in),
+                        Some(&outer),
+                    );
+                    script = Some(at);
                 }
             }
-            // A shell's -c string, recursively, in the shell's directory.
-            if SHELLS.contains(&name)
-                && let Some(script) = shell_script(&stripped[1..])
-            {
-                let outer = wrap.cloned().unwrap_or(spotted);
-                self.list(&script, 0, runs_in, Some(&outer));
-            }
         }
-        self.substitutions(s, base, dir, words, wrap);
-        false
+        self.substitutions(s, base, place, words, wrap);
+        (false, script)
     }
 
-    /// The rest of a program path that starts with a substitution printing the project's root.
+    /// The rest of a program path that starts with a substitution printing the project's root,
+    /// with `.` and `..` resolved; none when it leaves the project.
     fn path_from_root(&self, program: &str) -> Option<String> {
         let (inner, after) = if let Some(rest) = program.strip_prefix("$(") {
             rest.split_once(')')?
@@ -604,21 +738,30 @@ impl Spotter<'_, '_> {
         let inner = inner.trim();
         let prints_root = inner == "git rev-parse --show-toplevel"
             || self.machine.root_commands.iter().any(|c| c == inner);
-        let path = after.strip_prefix('/')?;
-        (prints_root && !path.is_empty()).then(|| path.to_owned())
+        let mut parts: Vec<&str> = Vec::new();
+        for part in after.strip_prefix('/')?.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                _ => parts.push(part),
+            }
+        }
+        (prints_root && !parts.is_empty()).then(|| parts.join("/"))
     }
 
-    /// The command substitutions in `words`, each a list of its own in the current directory.
+    /// The command substitutions in `words`, each a list of its own in the current place.
     fn substitutions(
         &mut self,
         s: &str,
         base: usize,
-        dir: &str,
+        place: &Place,
         words: &[Word],
         wrap: Option<&Spotted>,
     ) {
         for sub in words.iter().flat_map(|w| w.substitutions.clone()) {
-            self.list(&s[sub.clone()], base + sub.start, dir.to_owned(), wrap);
+            self.list(&s[sub.clone()], base + sub.start, place.clone(), wrap);
         }
     }
 }
