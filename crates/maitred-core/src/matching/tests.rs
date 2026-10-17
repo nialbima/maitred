@@ -403,3 +403,62 @@ fn command_looks_up_only_when_an_option_says_so() {
     assert_eq!(command(&["command", "bin/v"]), "bin/v");
     assert_eq!(command(&["command", "--verbose", "bin/x"]), "bin/x");
 }
+
+// sudo and doas (Nick, 2026-10-17): maitred can't supervise a job run as root, so one is refused.
+
+#[test]
+fn a_job_run_through_sudo_or_doas_is_refused() {
+    let f = file("x | ^bin/x | light | why");
+    for (argv, via) in [
+        (&["sudo", "bin/x"][..], "sudo"),
+        (&["/usr/bin/sudo", "-E", "-u", "nick", "bin/x"][..], "sudo"),
+        (&["nice", "doas", "-n", "bin/x"][..], "doas"),
+        (&["sudo", "-l"][..], "sudo"),
+    ] {
+        assert!(
+            matches!(classify(&f, &job(argv), &machine()), Classified::Escalated { via: v } if v == via),
+            "{argv:?}"
+        );
+    }
+}
+
+#[test]
+fn sudos_close_from_takes_a_value_and_moves_nothing() {
+    assert_eq!(
+        strip_wrappers(words(&["sudo", "-C", "3", "bin/x"]), &[], ROOT).dir,
+        ROOT
+    );
+    assert_eq!(
+        strip_wrappers(words(&["sudo", "-C", "3", "bin/x"]), &[], ROOT).words,
+        ["bin/x"]
+    );
+}
+
+#[test]
+fn sudos_chdir_moves_where_the_command_runs() {
+    for argv in [
+        &["sudo", "-D", "/elsewhere", "bin/x"][..],
+        &["sudo", "--chdir=/elsewhere", "bin/x"][..],
+    ] {
+        let stripped = strip_wrappers(words(argv), &[], ROOT);
+        assert_eq!(stripped.dir, "/elsewhere", "{argv:?}");
+        assert_eq!(stripped.escalated.as_deref(), Some("sudo"));
+    }
+}
+
+#[test]
+fn a_command_with_no_escalating_wrapper_isnt_escalated() {
+    assert_eq!(
+        strip_wrappers(
+            words(&["env", "-C", "/elsewhere", "nice", "bin/x"]),
+            &[],
+            ROOT
+        )
+        .escalated,
+        None
+    );
+}
+
+fn words(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|a| (*a).to_owned()).collect()
+}

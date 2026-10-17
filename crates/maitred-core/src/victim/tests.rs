@@ -856,3 +856,20 @@ fn a_dead_holders_fresh_pass_doesnt_set_the_pace() {
         Some(id("slow"))
     );
 }
+
+#[test]
+fn a_job_with_no_pass_and_no_admission_time_isnt_judged_behind() {
+    let mut unknown = running("unknown", Class::Heavy, 0);
+    unknown.admitted_at = None;
+    let mut snap = snapshot(vec![unknown]);
+    snap.load
+        .as_mut()
+        .unwrap()
+        .holder_passes
+        .remove(&id("unknown"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: false }),
+        Some(id("unknown"))
+    );
+}

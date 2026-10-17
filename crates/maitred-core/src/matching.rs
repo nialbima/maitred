@@ -37,6 +37,8 @@ pub enum Classified<'a> {
     KeepAwake { program: String },
     /// A shell running a string: the spotter finds its programs.
     Shell { shell: String, script: String },
+    /// Run through `sudo` or `doas`: maitred can't supervise a job run as root, so it is refused.
+    Escalated { via: String },
 }
 
 const KEEP_AWAKE: [&str; 2] = ["caffeinate", "systemd-inhibit"];
@@ -46,7 +48,14 @@ pub(crate) const SHELLS: [&str; 3] = ["sh", "bash", "zsh"];
 #[must_use]
 pub fn classify<'a>(file: &'a ClassFile, job: &Job, machine: &Machine) -> Classified<'a> {
     // 1. Wrappers, repeatedly; 2. the program normalised; 3. launchers, then normalised again.
-    let (mut words, dir) = strip_wrappers(job.argv.clone(), &machine.wrappers, &job.cwd);
+    let Stripped {
+        mut words,
+        dir,
+        escalated,
+    } = strip_wrappers(job.argv.clone(), &machine.wrappers, &job.cwd);
+    if let Some(via) = escalated {
+        return Classified::Escalated { via };
+    }
     normalise_program(&mut words, &dir, &job.root);
     if let Some(launcher) = machine
         .launchers
@@ -92,27 +101,32 @@ pub fn classify<'a>(file: &'a ClassFile, job: &Job, machine: &Machine) -> Classi
 
 /// Strips leading assignments and wrappers, with their options, until neither is first. Also gives
 /// the directory the rest runs in: `cwd`, moved by any `env -C` on the way.
-pub(crate) fn strip_wrappers(
-    mut words: Vec<String>,
-    extra: &[String],
-    cwd: &str,
-) -> (Vec<String>, String) {
+pub(crate) fn strip_wrappers(mut words: Vec<String>, extra: &[String], cwd: &str) -> Stripped {
     let mut dir = lexical(cwd);
+    let mut escalated = None;
+    let done = |words, dir, escalated| Stripped {
+        words,
+        dir,
+        escalated,
+    };
     loop {
         let assignments = words.iter().take_while(|w| is_assignment(w)).count();
         words.drain(..assignments);
         let Some(first) = words.first() else {
-            return (words, dir);
+            return done(words, dir, escalated);
         };
         let name = basename(first);
         let grammar = match grammar(name) {
             Some(grammar) => grammar,
             None if extra.iter().any(|e| e == name) => Grammar::NONE,
-            None => return (words, dir),
+            None => return done(words, dir, escalated),
         };
         // `command` with `v` or `V` among its options looks a program up; it runs nothing.
         if name == "command" && looks_up(&words[1..]) {
-            return (words, dir);
+            return done(words, dir, escalated);
+        }
+        if grammar.escalates {
+            escalated = Some(name.to_owned());
         }
         let (rest, chdir) = grammar.strip(&words);
         if let Some(chdir) = chdir {
@@ -120,6 +134,15 @@ pub(crate) fn strip_wrappers(
         }
         words = rest;
     }
+}
+
+/// A command with its wrappers stripped.
+pub(crate) struct Stripped {
+    pub(crate) words: Vec<String>,
+    /// The directory it runs in, after any wrapper that changes it.
+    pub(crate) dir: String,
+    /// The wrapper that runs it as another user (`sudo`, `doas`), if one does.
+    pub(crate) escalated: Option<String>,
 }
 
 /// Whether `command`'s options include `v` or `V`.
@@ -153,6 +176,12 @@ struct Grammar {
     words_with_value: Option<&'static [&'static str]>,
     /// Arguments of its own after its options (`timeout`'s duration).
     positional: usize,
+    /// The short options that change directory and split a string into words (`env -C`, `env
+    /// -S`), which mean something else to other wrappers (`sudo -C` closes descriptors).
+    chdir: Option<char>,
+    split: Option<char>,
+    /// It runs the command as another user.
+    escalates: bool,
 }
 
 impl Grammar {
@@ -161,6 +190,9 @@ impl Grammar {
         long_with_value: &[],
         words_with_value: None,
         positional: 0,
+        chdir: None,
+        split: None,
+        escalates: false,
     };
 
     /// The words after this wrapper, its options and its own arguments. `env -S` splits its
@@ -218,10 +250,10 @@ impl Grammar {
                     } else {
                         Some(attached)
                     };
-                    match c {
-                        'S' => split = value.map(str::to_owned),
-                        'C' => chdir = value.map(str::to_owned),
-                        _ => {}
+                    if Some(c) == self.split {
+                        split = value.map(str::to_owned);
+                    } else if Some(c) == self.chdir {
+                        chdir = value.map(str::to_owned);
                     }
                     break;
                 }
@@ -250,7 +282,36 @@ fn grammar(name: &str) -> Option<Grammar> {
         ..Grammar::NONE
     };
     Some(match name {
-        "env" => g("uCSP", &["unset", "chdir", "split-string"]),
+        "env" => Grammar {
+            chdir: Some('C'),
+            split: Some('S'),
+            ..g("uCSP", &["unset", "chdir", "split-string"])
+        },
+        // `-D` is sudo's chdir; `-C` closes descriptors from a number.
+        "sudo" => Grammar {
+            chdir: Some('D'),
+            escalates: true,
+            ..g(
+                "CDghpRrTtUu",
+                &[
+                    "close-from",
+                    "chdir",
+                    "group",
+                    "host",
+                    "prompt",
+                    "chroot",
+                    "role",
+                    "command-timeout",
+                    "type",
+                    "other-user",
+                    "user",
+                ],
+            )
+        },
+        "doas" => Grammar {
+            escalates: true,
+            ..g("Cu", &[])
+        },
         "exec" => g("a", &[]),
         "command" | "nohup" | "setsid" => Grammar::NONE,
         "time" => g("fo", &["format", "output"]),

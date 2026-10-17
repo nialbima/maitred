@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use crate::matching::{
-    Machine, SHELLS, basename, reads_stdin, resolve, shell_script, strip_wrappers,
+    Machine, SHELLS, Stripped, basename, reads_stdin, resolve, shell_script, strip_wrappers,
 };
 
 /// One program the string runs.
@@ -23,6 +23,9 @@ pub struct Spotted {
     pub span: Range<usize>,
     /// The command's leading assignments, which a refusal moves after `--` with `env`.
     pub assignments: Vec<Range<usize>>,
+    /// The wrapper that runs it as another user (`sudo`, `doas`), if one does: a refusal can
+    /// suggest no rewrite, since maitred can't supervise a job run as root.
+    pub escalated: Option<String>,
 }
 
 /// The programs `script` runs, in order, starting in `cwd`.
@@ -97,13 +100,15 @@ enum Token {
     Heredoc(Body),
 }
 
-/// A heredoc's body, the shell's stdin when it names no other descriptor; or a redirection's
-/// substitutions alone, with no body.
+/// What a redirection feeds a command: a heredoc's body or a here-string's word, the shell's stdin
+/// when it names no other descriptor; or a redirection's substitutions alone, with no script.
 #[derive(Debug, Clone, Default)]
 struct Body {
-    span: Range<usize>,
+    /// The script a shell reading it on stdin runs.
+    script: String,
     stdin: bool,
-    /// Its substitutions, when its delimiter wasn't quoted.
+    /// Its substitutions, which run whether or not a shell reads it (none in a heredoc whose
+    /// delimiter is quoted).
     substitutions: Vec<Range<usize>>,
 }
 
@@ -130,7 +135,7 @@ fn lex(s: &str) -> Vec<Token> {
                 for heredoc in heredocs.drain(..) {
                     let (end, span, substitutions) = heredoc_body(s, i, &heredoc);
                     if let Token::Heredoc(body) = &mut tokens[heredoc.token] {
-                        body.span = span;
+                        s[span].clone_into(&mut body.script);
                         body.substitutions = substitutions;
                     }
                     i = end;
@@ -165,46 +170,7 @@ fn lex(s: &str) -> Vec<Token> {
                 tokens.push(Token::Op(Op::Close));
                 i += 1;
             }
-            b'<' | b'>' => {
-                // A word of digits just before is the descriptor, not a word.
-                let mut descriptor = None;
-                if let Some(Token::Word(w)) = tokens.last()
-                    && w.span.end == i
-                    && w.plain
-                    && w.text.bytes().all(|c| c.is_ascii_digit())
-                {
-                    descriptor = Some(w.text.clone());
-                    tokens.pop();
-                }
-                if s[i..].starts_with("<<<") {
-                    i = redirect_target(s, i + 3, &mut tokens);
-                } else if s[i..].starts_with("<<") {
-                    let strip_tabs = bytes.get(i + 2) == Some(&b'-');
-                    i += if strip_tabs { 3 } else { 2 };
-                    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
-                        i += 1;
-                    }
-                    let (word, end) = word(s, i);
-                    let raw = &s[word.span.clone()];
-                    heredocs.push(Heredoc {
-                        delimiter: word.text,
-                        quoted: raw.contains(['\'', '"', '\\']),
-                        strip_tabs,
-                        token: tokens.len(),
-                    });
-                    tokens.push(Token::Heredoc(Body {
-                        stdin: descriptor.is_none_or(|d| d.parse() == Ok(0)),
-                        ..Body::default()
-                    }));
-                    i = end;
-                } else {
-                    let len = match (bytes[i], bytes.get(i + 1)) {
-                        (_, Some(b'&' | b'|' | b'>')) | (b'<', Some(b'<')) => 2,
-                        _ => 1,
-                    };
-                    i = redirect_target(s, i + len, &mut tokens);
-                }
-            }
+            b'<' | b'>' => i = redirection(s, i, &mut tokens, &mut heredocs),
             _ => {
                 let (word, end) = word(s, i);
                 tokens.push(Token::Word(word));
@@ -215,20 +181,88 @@ fn lex(s: &str) -> Vec<Token> {
     tokens
 }
 
+/// A redirection at `i`: its operator and what it takes, heredocs registered for their bodies;
+/// where it ends.
+fn redirection(
+    s: &str,
+    mut i: usize,
+    tokens: &mut Vec<Token>,
+    heredocs: &mut Vec<Heredoc>,
+) -> usize {
+    let bytes = s.as_bytes();
+    // A word of digits just before is the descriptor, not a word.
+    let mut descriptor = None;
+    if let Some(Token::Word(w)) = tokens.last()
+        && w.span.end == i
+        && w.plain
+        && w.text.bytes().all(|c| c.is_ascii_digit())
+    {
+        descriptor = Some(w.text.clone());
+        tokens.pop();
+    }
+    let stdin = descriptor.is_none_or(|d| d.parse() == Ok(0));
+    if s[i..].starts_with("<<<") {
+        // A word with an expansion in it is a script nobody can read until it runs:
+        // only its substitutions are spotted.
+        let (here, end) = target(s, i + 3);
+        match here {
+            Some(here) if here.plain => tokens.push(Token::Heredoc(Body {
+                script: here.text,
+                stdin,
+                substitutions: Vec::new(),
+            })),
+            Some(here) => tokens.push(Token::Substitutions(here.substitutions)),
+            None => {}
+        }
+        end
+    } else if s[i..].starts_with("<<") {
+        let strip_tabs = bytes.get(i + 2) == Some(&b'-');
+        i += if strip_tabs { 3 } else { 2 };
+        while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        let (word, end) = word(s, i);
+        let raw = &s[word.span.clone()];
+        heredocs.push(Heredoc {
+            delimiter: word.text,
+            quoted: raw.contains(['\'', '"', '\\']),
+            strip_tabs,
+            token: tokens.len(),
+        });
+        tokens.push(Token::Heredoc(Body {
+            stdin,
+            ..Body::default()
+        }));
+        end
+    } else {
+        let len = match (bytes[i], bytes.get(i + 1)) {
+            (_, Some(b'&' | b'|' | b'>')) | (b'<', Some(b'<')) => 2,
+            _ => 1,
+        };
+        redirect_target(s, i + len, tokens)
+    }
+}
+
 /// A redirection's target: skipped as a word, but a substitution in it still runs.
-fn redirect_target(s: &str, mut i: usize, tokens: &mut Vec<Token>) -> usize {
+fn redirect_target(s: &str, i: usize, tokens: &mut Vec<Token>) -> usize {
+    let (target, end) = target(s, i);
+    if let Some(target) = target.filter(|t| !t.substitutions.is_empty()) {
+        tokens.push(Token::Substitutions(target.substitutions));
+    }
+    end
+}
+
+/// The word a redirection's operator ending at `i` takes, if one follows, and where it ends.
+fn target(s: &str, mut i: usize) -> (Option<Word>, usize) {
     let bytes = s.as_bytes();
     while matches!(bytes.get(i), Some(b' ' | b'\t')) {
         i += 1;
     }
     if i >= bytes.len() || b"\n;&|()<>".contains(&bytes[i]) {
-        return i;
+        return (None, i);
     }
     let (target, end) = word(s, i);
-    if !target.substitutions.is_empty() {
-        tokens.push(Token::Substitutions(target.substitutions));
-    }
-    end
+    (Some(target), end)
 }
 
 /// A heredoc's body from `start`: where its delimiter's line ends, the body itself, and the
@@ -538,6 +572,8 @@ impl Spotter<'_, '_> {
         for token in lex(s) {
             match (mode, token) {
                 (Mode::Pattern, Token::Word(w)) => {
+                    // The shell runs a pattern's substitutions to make the pattern.
+                    self.substitutions(s, base, &place, std::slice::from_ref(&w), wrap);
                     if w.text == "esac" {
                         mode = Mode::Command;
                     }
@@ -564,7 +600,11 @@ impl Spotter<'_, '_> {
                     let words = std::mem::take(&mut words);
                     let bodies = std::mem::take(&mut bodies);
                     if self.command(s, base, &mut place, &words, &bodies, wrap) {
-                        mode = Mode::Pattern;
+                        // The case's patterns come next, unless this `)` already ended the
+                        // first one (`case $x in a) …`).
+                        if op != Op::Close {
+                            mode = Mode::Pattern;
+                        }
                         continue;
                     }
                     match op {
@@ -671,7 +711,11 @@ impl Spotter<'_, '_> {
             .iter()
             .map(|w| w.text.clone())
             .collect();
-        let (mut stripped, runs_in) = strip_wrappers(texts, &self.machine.wrappers, &place.dir);
+        let Stripped {
+            words: mut stripped,
+            dir: runs_in,
+            escalated,
+        } = strip_wrappers(texts, &self.machine.wrappers, &place.dir);
         if let Some(launcher) = self
             .machine
             .launchers
@@ -699,6 +743,7 @@ impl Spotter<'_, '_> {
                     },
                     |w| w.assignments.clone(),
                 ),
+                escalated: escalated.or_else(|| wrap.and_then(|w| w.escalated.clone())),
             };
             let name = basename(program);
             self.found.push(spotted.clone());
@@ -712,13 +757,8 @@ impl Spotter<'_, '_> {
                 } else if reads_stdin(&stripped[1..])
                     && let Some(at) = bodies.iter().rposition(|b| b.stdin)
                 {
-                    let body = bodies[at].span.clone();
-                    self.list(
-                        &s[body.clone()],
-                        base + body.start,
-                        Place::new(runs_in),
-                        Some(&outer),
-                    );
+                    // Its programs take the shell's span, so the script needs no offsets of its own.
+                    self.list(&bodies[at].script, 0, Place::new(runs_in), Some(&outer));
                     script = Some(at);
                 }
             }

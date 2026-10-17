@@ -58,6 +58,10 @@ fn sixty_four_bit_integers_are_written_as_strings() {
         "{line}"
     );
     assert!(line.contains(r#""asInt":"3""#), "{line}");
+    assert_eq!(
+        KeyValue::bool("maitred.thrash", true).to_json(),
+        r#"{"key":"maitred.thrash","value":{"boolValue":true}}"#
+    );
     assert!(
         KeyValue::int("maitred.processes", i64::MAX)
             .to_json()

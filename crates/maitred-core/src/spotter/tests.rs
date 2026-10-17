@@ -110,6 +110,13 @@ fn a_redirection_target_is_never_a_program() {
     assert_eq!(programs("a &> out; b >| out; c 2>&1"), ["a", "b", "c"]);
 }
 
+#[test]
+fn a_redirection_with_no_target_takes_nothing() {
+    // Not valid shell, but the spotter reads it without failing.
+    assert_eq!(programs("a >"), ["a"]);
+    assert_eq!(programs("a > ; b"), ["a", "b"]);
+}
+
 // Assignments, wrappers and launchers.
 
 #[test]
@@ -590,4 +597,120 @@ fn a_shell_with_options_and_a_script_file_reads_no_heredoc_as_its_script() {
 fn eval_is_spotted_and_its_script_is_not() {
     // The hook notes it to the agent rather than reading the script (Nick, 2026-10-17).
     assert_eq!(programs("eval 'bin/x run'; eval bin/y"), ["eval", "eval"]);
+}
+
+// Coverage.
+
+#[test]
+fn a_substitution_in_a_case_pattern_is_spotted() {
+    // The shell runs it to make the pattern.
+    assert_eq!(
+        programs("case $v in $(bin/x)) bin/y ;; \"`bin/z`\") ;; esac"),
+        ["bin/x", "bin/y", "bin/z"]
+    );
+}
+
+#[test]
+fn a_backslash_in_double_quotes_escapes_only_what_the_shell_says() {
+    assert_eq!(programs("\"bin/\\x\""), ["bin/\\x"]);
+    assert_eq!(programs("\"bin/\\$x\" \"a\\\nb\""), ["bin/$x"]);
+    assert_eq!(programs("echo \"\\$(bin/x)\" \"\\`bin/y\\`\""), ["echo"]);
+}
+
+#[test]
+fn quotes_and_escapes_inside_a_substitution_dont_close_it() {
+    assert_eq!(
+        programs("echo $(bin/x ')' \")\" \\) ) && bin/y"),
+        ["echo", "bin/x", "bin/y"]
+    );
+    assert_eq!(
+        programs("echo `bin/x \\` b` && bin/y"),
+        ["echo", "bin/x", "bin/y"]
+    );
+}
+
+#[test]
+fn a_substitution_inside_double_quotes_ends_where_the_shell_ends_it() {
+    // What follows its `)` is quoted text, so a substitution that ran on would spot bin/y.
+    assert_eq!(programs("echo \"$('a') ; bin/y\""), ["echo", "a"]);
+    assert_eq!(programs("echo \"$(echo \\') ; bin/y\""), ["echo", "echo"]);
+}
+
+#[test]
+fn a_backslash_before_a_character_of_several_bytes_escapes_all_of_it() {
+    assert_eq!(programs("echo \"\\é\"; bin/x"), ["echo", "bin/x"]);
+}
+
+#[test]
+fn an_unterminated_quote_or_substitution_runs_to_the_end() {
+    assert_eq!(programs("echo \"$(bin/x"), ["echo", "bin/x"]);
+    assert_eq!(programs("echo `bin/x"), ["echo", "bin/x"]);
+    assert_eq!(programs("echo \"bin/x"), ["echo"]);
+    assert_eq!(programs("bin/x\\"), ["bin/x"]);
+}
+
+#[test]
+fn a_substitution_where_a_case_pattern_has_no_room_for_one_is_still_spotted() {
+    // Not valid shell, but the spotter errs toward spotting.
+    assert_eq!(programs("case $v in a <<< $(bin/x)) ;; esac"), ["bin/x"]);
+    assert_eq!(
+        programs("case $v in a <<EOF\n$(bin/x)\nEOF\n) ;; esac"),
+        ["bin/x"]
+    );
+}
+
+#[test]
+fn a_case_pattern_on_the_line_of_its_in_still_ends_at_its_paren() {
+    assert_eq!(
+        programs("case $x in a) bin/y ;; b) bin/z ;; esac"),
+        ["bin/y", "bin/z"]
+    );
+    assert_eq!(
+        programs("case $x in *) bin/y ;; esac; bin/z"),
+        ["bin/y", "bin/z"]
+    );
+}
+
+#[test]
+fn a_here_string_fed_to_a_shell_is_spotted_as_its_script() {
+    assert_eq!(
+        programs("bash <<< 'bin/x run && bin/y'"),
+        ["bash", "bin/x", "bin/y"]
+    );
+    assert_eq!(programs("sh <<< \"$(bin/x)\""), ["sh", "bin/x"]);
+    assert_eq!(programs("bash run.sh <<< 'bin/x'"), ["bash"]);
+    assert_eq!(
+        suggestion("bash <<< 'bin/mutant run'", "bin/mutant", None),
+        "maitred -- bash <<< 'bin/mutant run'"
+    );
+}
+
+// sudo and doas (Nick, 2026-10-17).
+
+#[test]
+fn a_program_behind_sudo_or_doas_is_spotted_and_marked_escalated() {
+    let spotted = spot("sudo -u nick bin/x run; doas bin/y; bin/z", CWD, &machine());
+    let found: Vec<(&str, Option<&str>)> = spotted
+        .iter()
+        .map(|s| (s.program.as_str(), s.escalated.as_deref()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("bin/x", Some("sudo")),
+            ("bin/y", Some("doas")),
+            ("bin/z", None)
+        ]
+    );
+}
+
+#[test]
+fn a_program_in_the_script_of_an_escalated_shell_is_escalated_too() {
+    for script in ["sudo bash -c 'bin/x'", "sudo bash <<'EOF'\nbin/x\nEOF"] {
+        let x = spot(script, CWD, &machine())
+            .into_iter()
+            .find(|s| s.program == "bin/x")
+            .unwrap();
+        assert_eq!(x.escalated.as_deref(), Some("sudo"), "{script}");
+    }
 }

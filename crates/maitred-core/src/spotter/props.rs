@@ -89,9 +89,20 @@ fn script() -> impl Strategy<Value = Script> {
             inner
                 .clone()
                 .prop_map(|a| joined(&format!("time {}", a.text), [a])),
-            inner
-                .clone()
-                .prop_map(|a| joined(&format!("case $v in x|y) {} ;; esac", a.text), [a])),
+            (
+                inner.clone(),
+                prop_oneof![
+                    Just(" x)"),
+                    Just(" x|y)"),
+                    Just(" (x)"),
+                    Just("\nx)"),
+                    Just(" *)")
+                ]
+            )
+                .prop_map(|(a, pattern)| joined(
+                    &format!("case $v in{pattern} {} ;; esac", a.text),
+                    [a]
+                )),
             inner
                 .clone()
                 .prop_map(|a| echoed(&format!("echo $({})", a.text), a)),
