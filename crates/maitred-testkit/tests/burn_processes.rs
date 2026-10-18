@@ -1,7 +1,7 @@
 //! `burn`'s process behaviour: the children, daemons and signal handling that supervision scenarios need.
 
 use std::collections::HashMap;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Instant;
@@ -77,13 +77,18 @@ fn outlive() -> String {
     OUTLIVE_MS.to_string()
 }
 
-/// A burn this test started. Dropping it kills and collects it, so a test that fails part way leaves nothing
-/// running for `OUTLIVE_MS`.
+/// A burn this test started, leading a process group of its own. Dropping it kills the whole group and collects
+/// burn, so a test that fails part way leaves nothing running for `OUTLIVE_MS`: not burn, and not the children
+/// it started (a daemon leaves the group by design, and `Stray` covers it).
 struct Burn(Child);
 
 impl Burn {
     fn start(args: &[&str]) -> Self {
-        Self(burn(args).spawn().expect("burn didn't start"))
+        Self::spawn(&mut burn(args))
+    }
+
+    fn spawn(command: &mut Command) -> Self {
+        Self(command.process_group(0).spawn().expect("burn didn't start"))
     }
 
     fn pid(&self) -> String {
@@ -128,6 +133,11 @@ impl Burn {
 
 impl Drop for Burn {
     fn drop(&mut self) {
+        // burn leads its group, so the group's id is burn's pid.
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.pid())])
+            .stderr(Stdio::null())
+            .status();
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -283,9 +293,11 @@ fn with_term_ignored_it_runs_on_to_its_own_end() {
         "--ready",
         ready.to_str().unwrap(),
     ]);
-    child.ready(&ready);
+    let pids = child.ready(&ready);
     child.signal("TERM");
 
+    // Whenever TERM arrives, burn ignores it: its own sigaction says so, and it ends with its own status.
+    assert_eq!(pids.get("ignored").map(String::as_str), Some("TERM"));
     assert_eq!(child.finish().code(), Some(3));
 }
 
@@ -523,14 +535,12 @@ fn a_handled_term_ends_the_memory_fill_where_it_is() {
 
 #[test]
 fn a_reader_that_goes_away_kills_it_by_sigpipe_as_it_would_any_program() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_burn"))
-        .args(["--run-ms", "3000", "--print-every-ms", "20"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("burn didn't start");
-    drop(child.stdout.take());
-    let status = child.wait().expect("burn didn't finish");
+    // It runs on until it prints, so only the closed pipe can end it, whenever the first print comes.
+    let mut child = Burn::spawn(
+        burn(&["--run-ms", &outlive(), "--print-every-ms", "20"]).stdout(Stdio::piped()),
+    );
+    drop(child.0.stdout.take());
+    let status = child.finish();
 
     assert_eq!(status.signal(), Some(13), "{status:?}");
 }
@@ -566,6 +576,28 @@ fn children_can_keep_its_ignored_term_as_a_nohup_child_would() {
         Some("TERM"),
         "the child didn't keep the ignored TERM"
     );
+}
+
+#[test]
+fn dropping_a_burn_kills_the_children_it_started_too() {
+    let ready = report_path("drop-group");
+    let mut parent = Burn::start(&[
+        "--run-ms",
+        &outlive(),
+        "--orphan-child-run-ms",
+        &outlive(),
+        "--ready",
+        ready.to_str().unwrap(),
+    ]);
+    let orphan = parent
+        .ready(&ready)
+        .get("orphan")
+        .cloned()
+        .expect("no orphan in the ready file");
+
+    drop(parent);
+
+    until_dead(&orphan, "the orphan outlived the Burn that started it");
 }
 
 #[test]

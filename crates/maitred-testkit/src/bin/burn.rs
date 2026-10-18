@@ -154,6 +154,11 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
     if args.hold_fill_at_mb.is_some() != args.held.is_some() {
         return Err("--hold-fill-at-mb and --held go together".into());
     }
+    // A hold the fill never reaches would never write --held, and a test waiting on it would only fail at its
+    // ceiling, blaming burn rather than the flags.
+    if args.hold_fill_at_mb.is_some_and(|at| at >= args.mem_mb) {
+        return Err("--hold-fill-at-mb must be below --mem-mb".into());
+    }
     Ok(args)
 }
 

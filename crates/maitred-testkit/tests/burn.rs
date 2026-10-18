@@ -155,7 +155,7 @@ fn cpu_ms_for(name: &str, millicores: &str) -> f64 {
 // machine and are left out of an ordinary run. Run them with:
 //   heavy cargo nextest run -p maitred-testkit --run-ignored only
 #[test]
-fn one_core_really_spins() {
+fn it_spends_cpu_when_asked_for_a_core() {
     // burn ends once it has used 200 ms of CPU, however long a loaded machine takes to give it that; one that didn't
     // spin would run on to the ceiling (MT-054).
     let path = report_path("cpu-spins");
@@ -218,6 +218,24 @@ fn no_cores_uses_next_to_no_cpu() {
     let none = cpu_ms_for("cpu-none", "0");
 
     assert!(none < 50.0, "asked for no CPU, used {none} ms");
+}
+
+#[test]
+fn a_hold_without_its_file_or_one_the_fill_never_reaches_is_refused() {
+    for args in [
+        &["--mem-mb", "8", "--hold-fill-at-mb", "4"][..],
+        &["--mem-mb", "8", "--held", "/never"],
+        &[
+            "--mem-mb",
+            "8",
+            "--hold-fill-at-mb",
+            "8",
+            "--held",
+            "/never",
+        ],
+    ] {
+        assert_eq!(run(&mut burn(args)).status.code(), Some(64), "{args:?}");
+    }
 }
 
 #[test]
