@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 228, 2026-10-17):
+  Synced from the maitred architecture doc on claude.ai (rev 229, 2026-10-17):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -612,6 +612,8 @@ maitred leans on the standard library and two thin system crates, and writes its
 ## Testing
 
 The pure core is tested exhaustively and by property; everything that touches the operating system is tested with real processes, on both platforms, because that is where this kind of tool breaks.
+
+**A test waits for an event, never for a time** (Nick, 2026-10-17). A fixed deadline is allowed only as a ceiling a passing test never reaches (the test kit's `wait_ceiling`), or in a check that something does *not* happen. **Correctness and speed are measured apart, because they pull against each other:** a test that asserts how fast something happened fails under load for a reason that isn't a bug, and one loose enough never to fail says nothing about speed. So no correctness test asserts a duration. maitred's speed matters as much as its correctness, and it is measured on its own terms: by maitred timing itself on real machines (Telemetry, "maitred times itself"), and, where a figure needs a budget, by a benchmark run on a quiet machine outside `bin/check`, as the test kit's accuracy checks already are.
 
 | Layer | How | What it proves |
 | --- | --- | --- |
