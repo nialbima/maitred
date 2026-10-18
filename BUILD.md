@@ -88,7 +88,8 @@ the core.
       being the sample's time less its holder's pass (item 2, Nick 2026-10-18: doc and a `Load.jobs` comment,
       no new field); the order among equally-over candidates (item 1) and the jitter's direction (item 3)
 - [ ] `maitred-sim`, taking the test kit's scenarios, with the `decide` micro-benchmark (C1 in the performance
-      plan)
+      plan). The scenario DSL and the `Publisher` it reads load from are in `maitred-scenario` (phase 2b);
+      nothing in the test kit holds it up
 - [ ] The starvation row of Testing, on the simulator
 
 ## 2. The store
@@ -102,7 +103,7 @@ slot files; project files and exclusive records; the debug-only pause points and
 
 ## 2b. The test kit
 
-Owned by MitosisClaude, who should correct this list.
+Owned by MitosisClaude. Checked against the repo 2026-10-18, at `7b190c2`.
 
 **What:** `maitred-scenario` and `maitred-testkit` (Test kit): the scenario DSL, the runner for both targets,
 `burn`, `replay`, the pause-point controller, real error sources, the invariant checker and its audit
@@ -116,11 +117,22 @@ isn't built yet: this proves the scenario runs, not that it would catch the bug)
 **Status:**
 
 - [x] `burn`, with tests that wait for events rather than times (`ee4ac07`, `aacfeb4`)
-- [x] The pause-point controller (`maitred-testkit/src/pause.rs`)
-- [x] The invariant checker (`maitred-testkit/src/checker.rs`)
-- [x] The findings list (`maitred-testkit/FINDINGS.md`) and regression scenarios (`src/regressions/`)
-- [ ] The scenario DSL: in progress (MT-047, splitting `Running`)
-- [ ] `replay`
+- [x] The pause-point controller (`maitred-testkit/src/pause.rs`, `f447145`)
+- [x] The scenario DSL (`maitred-scenario`): jobs, load samples, faults, expectations and `validate`, with a
+      job's figure taken from its holder's last pass (`2f8731e`)
+- [x] Faults at pause points, as scenario steps (`maitred-scenario/src/fault.rs`, `3ceaabf`); carrying them out
+      on real processes waits on the runner
+- [x] The invariant checker (`maitred-testkit/src/checker.rs`, `2c17d62`, `906ca0f`), with its tests in
+      `tests/checker.rs`
+- [ ] The checker's audit cross-check (ARCHITECTURE.md:744): not built; maitred writes no audit entries until
+      the store (phase 2)
+- [x] The findings list (`maitred-testkit/FINDINGS.md`): 228 findings, and the counts add up (recounted
+      2026-10-18; no test checks them)
+- [x] Phase 1's regression scenarios (`src/regressions/phase1.rs`), each valid and naming its finding
+      (`tests/regressions.rs`)
+- [ ] Every regression scenario runs and fails on its named assertion: waits on the runner
+- [ ] MT-048: reshape the near-tie scenario so it fails without the victim file, and sweep its seeds
+- [ ] `replay`: only its `load/now.json` writer exists (`maitred-testkit/src/load_file.rs`, `8c40286`)
 - [ ] The runner for both targets
 
 ## 3. Platform and the sampler
