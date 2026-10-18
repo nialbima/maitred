@@ -195,6 +195,8 @@ struct Grammar {
     split: Option<char>,
     /// It runs the command as another user.
     escalates: bool,
+    /// A lone `-` is one of its options rather than the end of them (env's, for -i: MT-057).
+    dash: bool,
 }
 
 impl Grammar {
@@ -206,6 +208,7 @@ impl Grammar {
         chdir: None,
         split: None,
         escalates: false,
+        dash: false,
     };
 
     /// The words after this wrapper, its options and its own arguments. `env -S` splits its
@@ -219,7 +222,7 @@ impl Grammar {
                 i += 1;
                 break;
             }
-            if !word.starts_with('-') || word == "-" {
+            if !word.starts_with('-') || (word == "-" && !self.dash) {
                 break;
             }
             if let Some(with_value) = self.words_with_value {
@@ -298,6 +301,7 @@ fn grammar(name: &str) -> Option<Grammar> {
         "env" => Grammar {
             chdir: Some('C'),
             split: Some('S'),
+            dash: true,
             ..g("uCSP", &["unset", "chdir", "split-string"])
         },
         // `-D` is sudo's chdir; `-C` closes descriptors from a number.

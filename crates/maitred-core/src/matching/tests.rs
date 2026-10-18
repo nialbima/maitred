@@ -101,6 +101,19 @@ fn env_s_splits_its_string_into_the_command() {
 }
 
 #[test]
+fn a_string_env_s_cant_split_matches_no_rule() {
+    // env itself refuses an unclosed quote and runs nothing; maitred keeps the string whole, so no
+    // rule claims it and it is heavy.
+    assert_eq!(
+        matched(
+            "x | ^bin/x | light | why",
+            &job(&["env", "-S", "bin/x 'unclosed"])
+        ),
+        "heavy"
+    );
+}
+
+#[test]
 fn a_short_option_can_carry_its_value_attached() {
     assert_eq!(command(&["nice", "-n5", "bin/x"]), "bin/x");
     assert_eq!(command(&["xargs", "-n1", "-P4", "bin/x"]), "bin/x");
@@ -153,6 +166,32 @@ fn a_path_outside_the_project_and_a_bare_name_are_left_as_they_are() {
 }
 
 // 3. Launchers.
+
+#[test]
+fn an_empty_launcher_in_the_machine_config_matches_nothing() {
+    let mut machine = machine();
+    machine.launchers.insert(0, vec![]);
+    let f = file("x | ^bin/x | light | why");
+    assert!(matches!(
+        classify(&f, &job(&["npx", "bin/x"]), &machine),
+        Classified::Rule { .. }
+    ));
+}
+
+#[test]
+fn env_takes_a_lone_dash_as_its_dash_i() {
+    // MT-057: env(1), "accepts the - option as a synonym for -i".
+    assert_eq!(command(&["env", "-", "bin/x"]), "bin/x");
+    assert_eq!(command(&["env", "-", "A=1", "bin/x"]), "bin/x");
+    // To any other wrapper a lone `-` is no option: it ends them, and is the program.
+    assert_eq!(command(&["nice", "-", "x"]), "- x");
+}
+
+#[test]
+fn a_shell_given_a_dash_c_string_reads_no_script_from_stdin() {
+    assert!(!reads_stdin(&words(&["-c", "bin/x"])));
+    assert!(reads_stdin(&words(&["-s"])));
+}
 
 #[test]
 fn launchers_are_stripped_after_normalising_and_the_program_normalised_again() {
