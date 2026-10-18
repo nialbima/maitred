@@ -106,6 +106,34 @@ fn with_outputs(text: &str, ranges: &[Range<usize>]) -> String {
     script
 }
 
+/// What an unquoted heredoc's body is to the shell that reads it as its script. The shell that built
+/// it removed the backslash before `$`, a backquote and `\`, and a backslash-newline whole (POSIX,
+/// Here-Document), and put each substitution's output in its place (Qualmaude's H2).
+fn heredoc_script(body: &str, outputs: &[Range<usize>]) -> String {
+    let bytes = body.as_bytes();
+    let mut outputs = outputs.iter().peekable();
+    let mut script = String::new();
+    let mut i = 0;
+    while i < body.len() {
+        let at = i;
+        if let Some(output) = outputs.next_if(|o| o.start == i) {
+            script.push_str(OUTPUT);
+            i = output.end;
+        } else if bytes[i] == b'\\' && matches!(bytes.get(i + 1), Some(b'$' | b'`' | b'\\')) {
+            script.push(char::from(bytes[i + 1]));
+            i += 2;
+        } else if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 2;
+        } else {
+            let c = body[i..].chars().next().unwrap_or_default();
+            script.push(c);
+            i += c.len_utf8();
+        }
+        moved_on(at, i, body);
+    }
+    script
+}
+
 /// A substitution's range with its `$(`, `)` or backquotes, from the range of its inside.
 fn whole(s: &str, inside: &Range<usize>) -> Range<usize> {
     let opener = if s.as_bytes()[inside.start - 1] == b'`' {
@@ -201,7 +229,11 @@ fn lex(s: &str) -> (Vec<Token>, Vec<Body>) {
                         })
                         .collect();
                     let body = &mut bodies[heredoc.body];
-                    body.script = with_outputs(&s[span], &outputs);
+                    body.script = if heredoc.quoted {
+                        s[span].to_owned()
+                    } else {
+                        heredoc_script(&s[span], &outputs)
+                    };
                     body.substitutions = substitutions;
                     i = end;
                 }
@@ -527,23 +559,27 @@ fn closing_paren(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     let mut depth = 0usize;
     // The depth each open `case` started at: a `)` at that depth ends one of its patterns, not a
-    // parenthesis (MT-056).
+    // parenthesis (MT-056). `case` and `esac` are keywords only where a command starts; as an
+    // argument (`grep case f`) either is a word like any other.
     let mut cases: Vec<usize> = Vec::new();
+    let mut command_starts = true;
     let starts_word = |at: usize| b" \t\n;&|(".contains(&bytes[at - 1]);
-    let is_word = |at: usize, word: &str| {
-        s[at..].starts_with(word)
-            && bytes
-                .get(at + word.len())
-                .is_none_or(|c| b" \t\n;&|)".contains(c))
+    let word_at = |at: usize| {
+        let end = s[at..]
+            .find(|c: char| " \t\n;&|()<>".contains(c))
+            .map_or(s.len(), |n| at + n);
+        &s[at..end]
     };
     while i < bytes.len() {
         let at = i;
-        if starts_word(i) {
-            if is_word(i, "case") {
+        if starts_word(i) && !b" \t\n;&|()".contains(&bytes[i]) {
+            let word = word_at(i);
+            if command_starts && word == "case" {
                 cases.push(depth);
-            } else if is_word(i, "esac") {
+            } else if command_starts && word == "esac" {
                 cases.pop();
             }
+            command_starts = LEADS.contains(&word);
         }
         match bytes[i] {
             b'\\' => i += 1,
@@ -559,8 +595,13 @@ fn closing_paren(s: &str, mut i: usize) -> usize {
                 };
                 i = double_quoted(s, i + 1, &mut scratch) - 1;
             }
-            b'(' => depth += 1,
-            b')' if cases.last() == Some(&depth) => {}
+            b';' | b'&' | b'|' | b'\n' => command_starts = true,
+            b'(' => {
+                depth += 1;
+                command_starts = true;
+            }
+            // A pattern's `)`: its branch's command comes next.
+            b')' if cases.last() == Some(&depth) => command_starts = true,
             b')' if depth == 0 => return i,
             b')' => depth -= 1,
             _ => {}

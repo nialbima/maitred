@@ -650,6 +650,42 @@ fn a_substitution_over_several_lines_of_a_heredoc_is_read_once() {
 }
 
 #[test]
+fn an_unquoted_heredoc_reaches_its_shell_with_the_backslashes_its_builder_removed() {
+    // Qualmaude's H2: the outer shell removes the backslash before $, `, \ and a newline, so the
+    // inner shell runs `bin/x` and reads $HOME as its own variable.
+    assert_eq!(
+        programs("bash <<EOF\necho \\`bin/x\\`\nEOF"),
+        ["bash", "echo", "bin/x"]
+    );
+    // Alone on its line, its output is the command run: a program nobody can name, then bin/x.
+    assert_eq!(
+        programs("bash <<EOF\n\\`bin/x\\`\nEOF"),
+        ["bash", "`bin/x`", "bin/x"]
+    );
+    assert_eq!(programs("bash <<EOF\nbin/\\\nx\nEOF"), ["bash", "bin/x"]);
+    // It removes a backslash-newline even inside the script's own quotes.
+    assert_eq!(programs("bash <<EOF\n'bin/\\\nx'\nEOF"), ["bash", "bin/x"]);
+    assert_eq!(
+        programs("bash <<EOF\n\\$HOME/bin/x\nEOF"),
+        ["bash", "$HOME/bin/x"]
+    );
+    // The inner shell runs it, as root under sudo.
+    let x = spot("sudo bash <<EOF\necho \\`bin/x\\`\nEOF", CWD, &machine())
+        .into_iter()
+        .find(|s| s.program == "bin/x")
+        .unwrap();
+    assert_eq!(x.escalated.as_deref(), Some("sudo"));
+}
+
+#[test]
+fn a_quoted_heredoc_reaches_its_shell_as_written() {
+    assert_eq!(
+        programs("bash <<'EOF'\necho \\`bin/x\\`\nEOF"),
+        ["bash", "echo"]
+    );
+}
+
+#[test]
 fn a_variable_in_a_heredoc_starts_no_substitution() {
     assert_eq!(
         programs("cat <<EOF\n$v bin/x\n$(bin/y)\nEOF"),
@@ -762,6 +798,20 @@ fn a_case_inside_parentheses_in_a_substitution_doesnt_end_it_early() {
     assert_eq!(
         programs("echo \"$(case $v in x) (bin/a) ;; esac; bin/b)\""),
         ["echo", "bin/a", "bin/b"]
+    );
+}
+
+#[test]
+fn case_and_esac_count_only_where_a_command_starts() {
+    // Qualmaude's H1: as arguments they are just words.
+    assert_eq!(
+        programs("echo \"$(grep case f)\"; bin/x"),
+        ["echo", "grep", "bin/x"]
+    );
+    assert_eq!(programs("x=\"$(grep case f)\" && bin/x"), ["grep", "bin/x"]);
+    assert_eq!(
+        programs("echo $(case $x in a) echo esac;; b) bin/x;; esac)"),
+        ["echo", "echo", "bin/x"]
     );
 }
 
