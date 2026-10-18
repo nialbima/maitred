@@ -74,7 +74,7 @@ fn a_jobs_figure_is_what_its_holder_last_measured_not_what_it_uses_now() {
 fn a_holders_last_measurement_stays_in_the_sample_however_old() {
     let mut publisher = Publisher::new(&machine());
 
-    // Ten sample intervals since the holder's last pass (Nick, MT-046: until it writes the next one).
+    // Ten sample intervals since the holder's last pass (ARCHITECTURE rev 243: until it writes the next one).
     let load_file = publisher.publish(
         &Sample::at(ms(2_100)),
         &[Running::new("a", job(500, 64)).holder_passed(ms(100), job(500, 64))],

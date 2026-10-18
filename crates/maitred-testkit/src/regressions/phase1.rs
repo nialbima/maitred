@@ -641,11 +641,11 @@ fn a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit() -> Scenar
 /// by then: by its own holder on that pass, or by the other's, which keeps the name.
 ///
 /// Without the name it is late, not lost (MT-048). Each sample carries a job's figure from its holder's last pass,
-/// however old (MT-046), so each holder's view of its own job is a pass behind the other's, and across one 500 ms
-/// flip both can see the other job as furthest over. A paper model of these rules (maitred-research
-/// spikes/2026-10-17-kill-policy-timing-model) has that on about 23% of seeds (15% if jitter can also shorten a
-/// pass), each killed by about 2.9 s. So the scenario is checked over a sweep of seeds, not one pinned seed, for
-/// that share failing with the name taken out and none failing with it.
+/// however old (ARCHITECTURE rev 243), so each holder's view of its own job is a pass behind the other's, and across
+/// one 500 ms flip both can see the other job as furthest over. A paper model of these rules (maitred-research
+/// spikes/2026-10-17-kill-policy-timing-model) has that on about 23% of seeds, each killed by about 2.9 s. So the
+/// scenario is checked over a sweep of seeds, not one pinned seed, for that share failing with the name taken out
+/// and none failing with it.
 fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
     Scenario::new(
         "two near-tied jobs whose order flips between holder passes lose exactly one, promptly",
@@ -725,8 +725,8 @@ fn a_named_victim_whose_holder_is_stopped_gives_way() -> Scenario {
 /// in the sample can be over 1.2 s old, so a rule judging each pass against the clock excludes every holder and stops
 /// nobody. Judged against the freshest pass, the freshest holder stays a candidate, and one job is stopped within
 /// two storm intervals of the breach and their jitter (2 + 2 × 1.44 s, so 5 s). Every figure stays in the sample
-/// however old its pass (MT-046), so the candidate furthest over is chosen: `x` when both holders are candidates,
-/// otherwise the freshest holder's job.
+/// however old its pass (ARCHITECTURE rev 243), so the candidate furthest over is chosen: `x` when both holders are
+/// candidates, otherwise the freshest holder's job.
 fn a_breach_during_a_swap_storm_still_stops_one_job() -> Scenario {
     Scenario::new(
         "a memory breach during a swap storm that slows every holder still stops exactly one job",

@@ -111,9 +111,10 @@ pub struct Running<'a> {
     /// What it uses at the sample's moment, which is what the machine's figures see.
     pub uses: Amount,
     /// Its holder's latest pass before the sample; `None` before its first. The sample copies what that pass
-    /// measured into `jobs` however old it is, until the holder writes the next (Nick, MT-046), and its start into
-    /// `holder_passes`, so the figure's age is `sampled_at` less that start. A job with no pass yet counts in the
-    /// machine's figures but isn't listed under `jobs`, so admission charges it its whole reservation.
+    /// measured into `jobs` however old it is, until the holder writes the next (ARCHITECTURE rev 243), and its
+    /// start into `holder_passes`, so the figure's age is `sampled_at` less that start. A job with no pass yet
+    /// counts in the machine's figures but isn't listed under `jobs`, so admission charges it its whole
+    /// reservation.
     pub last_pass: Option<HolderPass>,
 }
 
