@@ -34,6 +34,8 @@ pub enum End {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub admissions: Vec<(String, Ms)>,
+    /// Each victim, at the moment its own holder creates its stop marker (ARCHITECTURE.md, Kill policy step 2's
+    /// end, before it signals in step 3). Another holder choosing or naming it isn't a kill.
     pub kills: Vec<(String, Trigger, Ms)>,
     /// How each run ended, and when.
     pub ends: Vec<(String, End, Ms)>,

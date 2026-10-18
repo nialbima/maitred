@@ -175,7 +175,7 @@ fn a_job_whose_holder_hasnt_passed_loads_the_machine_but_isnt_listed() {
 }
 
 #[test]
-fn maitreds_running_threads_sum_the_measured_jobs_threads() {
+fn maitreds_running_threads_sum_the_threads_each_holder_counted() {
     let mut publisher = Publisher::new(&machine());
 
     let load_file = publisher.publish(
@@ -187,12 +187,27 @@ fn maitreds_running_threads_sum_the_measured_jobs_threads() {
             Running::new("b", job(500, 0))
                 .holder_passed(ms(100), job(500, 0))
                 .threads(1),
-            Running::new("c", job(4_000, 0)).threads(4),
+            // About 4 threads by its CPU use, but its holder hasn't passed, so it has counted none.
+            Running::new("c", job(4_000, 0)),
         ],
         None,
     );
 
     assert_eq!(load_file.maitred_running_threads, 4);
+}
+
+#[test]
+fn maitreds_running_threads_come_from_the_holders_pass_not_the_samples_moment() {
+    let mut publisher = Publisher::new(&machine());
+
+    // Its holder counted 1 thread at 100 ms; by the sample it runs 8 cores' worth.
+    let load_file = publisher.publish(
+        &Sample::at(ms(200)),
+        &[Running::new("a", job(8_000, 0)).holder_passed(ms(100), job(1_000, 0))],
+        None,
+    );
+
+    assert_eq!(load_file.maitred_running_threads, 1);
 }
 
 #[test]

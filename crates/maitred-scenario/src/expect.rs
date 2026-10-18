@@ -21,18 +21,18 @@ pub enum Expect {
     NeverTogether { first: String, second: String },
     /// At no moment are more than `allowed` of these jobs running.
     AtMostTogether { allowed: usize, labels: Vec<String> },
-    /// The job is chosen as a victim for `trigger`.
+    /// The job is stopped as a victim for `trigger`.
     Killed { label: String, trigger: Trigger },
-    /// Exactly one of these jobs is chosen as a victim for `trigger`, at or before `by`: for near-tied jobs, where
+    /// Exactly one of these jobs is stopped as a victim for `trigger`, at or before `by`: for near-tied jobs, where
     /// which one goes depends on which holder chooses first.
     OneKilledBy {
         labels: Vec<String>,
         trigger: Trigger,
         by: Ms,
     },
-    /// The job is never chosen as a victim.
+    /// The job is never stopped as a victim.
     NotKilled(String),
-    /// No more than `allowed` victims are chosen for `trigger` in the whole run.
+    /// No more than `allowed` victims are stopped for `trigger` in the whole run.
     AtMostKills { trigger: Trigger, allowed: usize },
     /// The job's record carries this flag, such as `tainted`.
     RecordFlag { label: String, flag: String },
@@ -47,7 +47,7 @@ pub enum Failure {
     AdmittedTwice(String),
     /// The outcome reports one job ended twice.
     EndedTwice(String),
-    /// The outcome reports one job chosen as a victim twice.
+    /// The outcome reports one job stopped as a victim twice.
     KilledTwice(String),
     /// The outcome reports a job ending before it was admitted, or without being admitted.
     EndedBeforeAdmitted(String),

@@ -210,10 +210,11 @@ impl MachineConfig {
         self
     }
 
-    /// Sets how often a waiting supervisor runs an admission pass.
+    /// Sets how often a waiting supervisor runs an admission pass, keeping the stall limit at 5 of them.
     #[must_use]
     pub fn poll_interval(mut self, interval: Ms) -> Self {
         self.poll_interval = interval;
+        self.stall_limit = Ms(interval.0 * 5);
         self
     }
 

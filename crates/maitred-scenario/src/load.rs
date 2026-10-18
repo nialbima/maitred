@@ -93,12 +93,15 @@ impl Sample {
     }
 }
 
-/// A holder's pass: when it started and the use it measured, both written to `tickets/<id>.use`
-/// (ARCHITECTURE.md: tickets).
+/// A holder's pass: when it started, the use it measured and the running threads it counted, all written to
+/// `tickets/<id>.use` (ARCHITECTURE.md: tickets, and macOS's thread count).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HolderPass {
     pub at: Ms,
     pub measured: Amount,
+    /// In thousandths, summed into `maitred_running_threads`. By default its measured CPU use: a job using 1100
+    /// millicores has about 1.1 threads running.
+    pub threads_milli: u32,
 }
 
 /// A job running when a sample is taken.
@@ -107,9 +110,6 @@ pub struct Running<'a> {
     pub label: &'a str,
     /// What it uses at the sample's moment, which is what the machine's figures see.
     pub uses: Amount,
-    /// Its running threads in thousandths, summed into `maitred_running_threads` once its holder has passed. By
-    /// default its CPU use: a job using 1100 millicores has about 1.1 threads running.
-    pub threads_milli: u32,
     /// Its holder's latest pass before the sample; `None` before its first. The sample copies what that pass
     /// measured into `jobs` however old it is, until the holder writes the next (Nick, MT-046), and its start into
     /// `holder_passes`, so the figure's age is `sampled_at` less that start. A job with no pass yet counts in the
@@ -124,22 +124,33 @@ impl<'a> Running<'a> {
         Self {
             label,
             uses,
-            threads_milli: uses.cpu_millicores,
             last_pass: None,
         }
-    }
-
-    /// Sets its running threads, in whole threads.
-    #[must_use]
-    pub fn threads(mut self, threads: u32) -> Self {
-        self.threads_milli = threads.saturating_mul(1_000);
-        self
     }
 
     /// Sets its holder's latest pass: when it started, and the use it measured then.
     #[must_use]
     pub fn holder_passed(mut self, at: Ms, measured: Amount) -> Self {
-        self.last_pass = Some(HolderPass { at, measured });
+        self.last_pass = Some(HolderPass {
+            at,
+            measured,
+            threads_milli: measured.cpu_millicores,
+        });
+        self
+    }
+
+    /// Sets the running threads its holder counted on that pass, in whole threads.
+    ///
+    /// # Panics
+    ///
+    /// If its holder hasn't passed: a holder counts threads only on a pass.
+    #[must_use]
+    pub fn threads(mut self, threads: u32) -> Self {
+        let pass = self
+            .last_pass
+            .as_mut()
+            .expect("threads needs holder_passed before it");
+        pass.threads_milli = threads.saturating_mul(1_000);
         self
     }
 }
@@ -163,7 +174,8 @@ pub struct Published {
     pub cpu_runnable_per_core_permille: u32,
     pub mem_available_mb: u32,
     pub gpu_permille: Option<u32>,
-    /// maitred's own running threads: the measured jobs' threads, summed (macOS's CPU kill reads it).
+    /// maitred's own running threads: what each job's holder counted on its last pass, summed (macOS's CPU kill reads
+    /// it).
     pub maitred_running_threads: u32,
     pub quiet_streak: u32,
     pub over_cpu_streak: u32,
@@ -267,8 +279,8 @@ impl Publisher {
         };
         let measured_threads_milli = running
             .iter()
-            .filter(|job| job.last_pass.is_some())
-            .fold(0_u32, |sum, job| sum.saturating_add(job.threads_milli));
+            .filter_map(|job| job.last_pass)
+            .fold(0_u32, |sum, pass| sum.saturating_add(pass.threads_milli));
         let over_cpu = match self.platform {
             // macOS: maitred's own running threads per core, counted only while CPU use is known and at capacity.
             Platform::MacOs => {

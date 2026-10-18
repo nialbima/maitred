@@ -209,3 +209,19 @@ fn the_findings_lists_counts_match_its_lines() {
         assert_eq!(Some(&figures), counted.get(&report), "{report}'s counts");
     }
 }
+
+#[test]
+fn every_line_under_a_reports_heading_is_one_of_its_findings() {
+    // A line the other checks can't parse would drop out of every count without failing one.
+    let mut report = None;
+    for line in FINDINGS.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            report = heading.starts_with('r').then_some(heading);
+        } else if let Some(report) = report.filter(|_| !line.trim().is_empty()) {
+            assert!(
+                line.starts_with(&format!("{report} ")) && line.contains(" | "),
+                "under ## {report}, not a finding line: '{line}'"
+            );
+        }
+    }
+}
