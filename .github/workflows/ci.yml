@@ -3,6 +3,9 @@ name: ci
 on:
   push:
   pull_request:
+  # The whole crate's mutants, weekly; pushes test only what they changed.
+  schedule:
+    - cron: "17 6 * * 1"
 
 jobs:
   check:
@@ -13,18 +16,52 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-deny,cargo-machete
+          tool: cargo-nextest,cargo-deny,cargo-machete,cargo-llvm-cov
       - run: bin/check
+
+  branches:
+    name: branch coverage (pinned nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: bin/coverage-branches
+
+  mutants:
+    name: mutants (${{ github.event_name == 'schedule' && 'whole crate' || 'changed lines' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # A branch's first push has no commit before it, so it tests every mutant.
+      - run: |
+          before="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = schedule ] || [ -z "$before" ] || [ "$before" = 0000000000000000000000000000000000000000 ]; then
+            bin/mutants --all
+          elif [ "${{ github.event_name }}" = pull_request ]; then
+            bin/mutants --since "${{ github.event.pull_request.base.sha }}"
+          else
+            bin/mutants --since "$before"
+          fi
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants.out
+          path: mutants.out
 
   msrv:
     name: builds at rust-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           msrv=$(sed -nE 's/^rust-version = "([0-9.]+)"/\1/p' Cargo.toml)
           rustup toolchain install "$msrv" --profile minimal
@@ -38,7 +75,7 @@ jobs:
         limits: ["--memory=2g --cpus=2", "none"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           limits="${{ matrix.limits }}"
           [ "$limits" = none ] && limits=""

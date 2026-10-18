@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Branch coverage of maitred-core: every branch, `match` arm and `&&`/`||` side a test never took.
+# Usage: bin/coverage-branches
+#
+# Rust's branch instrumentation is nightly-only (`-Z coverage-options=branch`; the pinned stable
+# rustc refuses it), so this one report builds with a pinned, dated nightly. Everything else runs
+# on the stable toolchain rust-toolchain.toml pins. Lines, regions and functions are gated in
+# bin/check; this fails on a single branch never taken (Nick, 2026-10-18).
+#
+# Two checks come first:
+# - whether the pinned stable rustc now accepts branch coverage, in which case the nightly can go;
+# - that the nightly's own line, region and function counts match stable's (none uncovered). A
+#   report that disagrees is wrong somewhere, so it fails here rather than being believed. It caught
+#   builds from two toolchains sharing one target directory, whose report counted functions from
+#   both; each toolchain now builds into its own.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+nightly="nightly-2026-08-15"
+ignore='/(tests|props)\.rs$|/testgen\.rs$'
+
+# Asks the stable rustc to compile an empty crate with branch coverage, under the spelling it
+# refuses today and the one it is likely to take once stable (a guess: -Z options usually become
+# -C ones). Either one working means this script no longer needs the nightly.
+# A control without the option must compile, or the probe could never report anything.
+probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/maitred-probe.XXXXXX")
+trap 'rm -rf "$probe_dir"' EXIT
+probe() {
+  # shellcheck disable=SC2068 # each option is two words on purpose
+  echo 'fn main() {}' | rustc - --crate-name probe -C instrument-coverage $@ \
+    --emit=metadata --out-dir "$probe_dir" >/dev/null 2>&1
+}
+if ! probe; then
+  echo "bin/coverage-branches: stable rustc can't compile the probe at all; fix the probe" >&2
+  exit 1
+fi
+for option in "-Z coverage-options=branch" "-C coverage-options=branch"; do
+  # shellcheck disable=SC2086 # the option is two words on purpose
+  if probe $option; then
+    message="stable rustc $(rustc --version | cut -d' ' -f2) accepts '$option': branch coverage may no longer need $nightly"
+    echo "bin/coverage-branches: $message" >&2
+    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning title=Branch coverage on stable::$message"
+  fi
+done
+
+if ! rustup run "$nightly" rustc --version >/dev/null 2>&1; then
+  rustup toolchain install "$nightly" --profile minimal --component llvm-tools-preview
+fi
+
+export CARGO_LLVM_COV_TARGET_DIR="target/llvm-cov-$nightly"
+cargo "+$nightly" llvm-cov --package maitred-core --locked --branch --summary-only \
+  --ignore-filename-regex "$ignore" \
+  --fail-uncovered-lines 0 --fail-uncovered-regions 0 --fail-uncovered-functions 0 || {
+  echo "bin/coverage-branches: a test failed, or $nightly's line, region and function counts disagree with stable's (bin/check finds every one run); don't trust its branches" >&2
+  exit 1
+}
+
+# cargo-llvm-cov has no --fail-uncovered-branches, so the count comes from the same run's summary.
+missed=$(cargo "+$nightly" llvm-cov report --package maitred-core --branch --json --summary-only \
+  --ignore-filename-regex "$ignore" | jq '.data[0].totals.branches.notcovered')
+if [ "$missed" != 0 ]; then
+  echo "bin/coverage-branches: $missed branches never taken; the report above names the files" >&2
+  exit 1
+fi

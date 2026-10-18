@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Mutation testing for maitred-core, inside a Linux container with a hard memory limit.
+# Usage: bin/mutants [--crate NAME] [--all | --since REF] [cargo-mutants arguments...]
+#
+# Never run cargo-mutants on the host. A mutant that stops a loop from advancing (a deleted arm in
+# the lexer, say) allocates without bound; on 2026-10-18 two at once froze a 16 GB machine until a
+# hard reset. In the container the kernel kills such a mutant at the memory limit, which
+# cargo-mutants counts as caught, and the host never sees it.
+#
+# By default it tests the lines that differ from HEAD, the change about to be committed (new files
+# count only once `git add -N` has told git about them). --since REF tests what differs from REF
+# instead (CI passes the commit before a push). --all tests every mutant in the crate.
+# --crate picks the package (default maitred-core), so every crate's run gets the same limits.
+# Other arguments go to cargo-mutants. Results land in mutants.out/ as usual.
+#
+# MAITRED_MUTANTS_MEMORY (default 4g) and MAITRED_MUTANTS_CPUS (default 3) size the container.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+memory=${MAITRED_MUTANTS_MEMORY:-4g}
+cpus=${MAITRED_MUTANTS_CPUS:-3}
+image=rust:1.98-slim
+cargo_mutants_version=27.1.0
+
+all=false
+crate=maitred-core
+base=HEAD
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all) all=true ;;
+    --since)
+      [ $# -ge 2 ] || { echo "bin/mutants: --since needs a commit" >&2; exit 64; }
+      base=$2
+      shift
+      ;;
+    --crate)
+      [ $# -ge 2 ] || { echo "bin/mutants: --crate needs a package name" >&2; exit 64; }
+      crate=$2
+      shift
+      ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+
+diff_file=$(mktemp "${TMPDIR:-/tmp}/maitred-mutants.XXXXXX")
+trap 'rm -f "$diff_file"' EXIT
+if [ "$all" = false ]; then
+  git diff "$base" >"$diff_file"
+  if [ ! -s "$diff_file" ]; then
+    echo "bin/mutants: nothing differs from $base; pass --all to test every mutant" >&2
+    exit 1
+  fi
+  args=(--in-diff /in.diff ${args[@]+"${args[@]}"})
+fi
+
+# No swap beyond the memory limit, so a runaway mutant is killed rather than paged out. cargo-mutants
+# is installed once into a volume; the registry is cached in another.
+docker run --rm \
+  --memory="$memory" --memory-swap="$memory" --cpus="$cpus" \
+  -v "$PWD:/src" -w /src \
+  -v "$diff_file:/in.diff:ro" \
+  -v maitred-mutants-tools:/tools \
+  -v maitred-mutants-registry:/usr/local/cargo/registry \
+  "$image" \
+  bash -c '
+    set -euo pipefail
+    if [ ! -x /tools/bin/cargo-mutants ]; then
+      cargo install --locked --root /tools cargo-mutants --version '"$cargo_mutants_version"'
+    fi
+    crate=$1
+    shift
+    exec /tools/bin/cargo-mutants mutants --package "$crate" --jobs 2 "$@"
+  ' bin/mutants "$crate" ${args[@]+"${args[@]}"}
