@@ -17,6 +17,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# jq reads the branch count at the end; without it the run would fail only after the nightly build.
+command -v jq >/dev/null || { echo "bin/coverage-branches: jq is not installed" >&2; exit 1; }
+
 nightly="nightly-2026-08-15"
 ignore='/(tests|props)\.rs$|/testgen\.rs$'
 

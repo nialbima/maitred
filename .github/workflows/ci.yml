@@ -35,21 +35,27 @@ jobs:
 
   mutants:
     name: mutants (${{ github.event_name == 'schedule' && 'whole crate' || 'changed lines' }})
+    # A pull request's branch is tested by its pushes; running here too would test it twice.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      # A branch's first push has no commit before it, so it tests every mutant.
+      # Test what this push changed: since the commit before it if CI still has it (a force-push can
+      # leave it unknown), else since the branch left main. Only main itself, or the weekly run, tests
+      # the whole crate.
       - run: |
           before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = schedule ] || [ -z "$before" ] || [ "$before" = 0000000000000000000000000000000000000000 ]; then
+          if [ "${{ github.event_name }}" = schedule ]; then
             bin/mutants --all
-          elif [ "${{ github.event_name }}" = pull_request ]; then
-            bin/mutants --since "${{ github.event.pull_request.base.sha }}"
-          else
+          elif [ -n "$before" ] && git cat-file -e "$before^{commit}" 2>/dev/null; then
             bin/mutants --since "$before"
+          elif [ "${{ github.ref_name }}" != main ]; then
+            bin/mutants --since "$(git merge-base origin/main HEAD)"
+          else
+            bin/mutants --all
           fi
       - if: always()
         uses: actions/upload-artifact@v7

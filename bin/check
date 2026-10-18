@@ -38,16 +38,15 @@ if offenders=$(grep -rnE 'Duration::from_(secs|millis|micros|nanos|secs_f32|secs
   exit 1
 fi
 
-step "tests"
-cargo nextest run --workspace --locked --no-tests=pass
-
-step "coverage: every line, region and function of maitred-core runs in a test"
-# Counts, not percentages, so rounding can't hide one. Test-only files aren't product code. Branch
-# coverage needs a nightly compiler, so it has its own job (bin/coverage-branches); mutants run in
-# a memory-capped container (bin/mutants). Each toolchain builds into its own directory: llvm-cov
-# reads every binary it finds, and one built by another compiler shows its code as never run.
-CARGO_LLVM_COV_TARGET_DIR="target/llvm-cov-$(rustc --version | cut -d' ' -f2)" cargo llvm-cov --package maitred-core --locked --summary-only \
-  --ignore-filename-regex '/(tests|props)\.rs$|/testgen\.rs$' \
+step "tests, and coverage: every line, region and function of maitred-core runs in a test"
+# One instrumented run of the whole workspace's tests, with the report limited to maitred-core's product
+# code. Counts, not percentages, so rounding can't hide one. Branch coverage needs a nightly compiler, so
+# it has its own job (bin/coverage-branches); mutants run in a memory-capped container (bin/mutants).
+# Each toolchain builds into its own directory: llvm-cov reads every binary it finds, and one built by
+# another compiler shows its code as never run.
+CARGO_LLVM_COV_TARGET_DIR="target/llvm-cov-$(rustc --version | cut -d' ' -f2)" \
+  cargo llvm-cov nextest --workspace --locked --no-tests=pass --summary-only \
+  --ignore-filename-regex '/(tests|props)\.rs$|/testgen\.rs$|crates/maitred(-scenario|-testkit|-sim)?/' \
   --fail-uncovered-lines 0 --fail-uncovered-regions 0 --fail-uncovered-functions 0
 
 step "docs"
