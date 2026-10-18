@@ -80,7 +80,14 @@ fn outlive() -> String {
 /// A burn this test started, leading a process group of its own. Dropping it kills the whole group and collects
 /// burn, so a test that fails part way leaves nothing running for `OUTLIVE_MS`: not burn, and not the children
 /// it started (a daemon leaves the group by design, and `Stray` covers it).
-struct Burn(Child);
+struct Burn(Child, Reaped);
+
+/// Whether burn has been collected. Until it has, its pid, and with it the group's id, can't be reused.
+#[derive(PartialEq, Eq)]
+enum Reaped {
+    No,
+    Yes,
+}
 
 impl Burn {
     fn start(args: &[&str]) -> Self {
@@ -88,7 +95,10 @@ impl Burn {
     }
 
     fn spawn(command: &mut Command) -> Self {
-        Self(command.process_group(0).spawn().expect("burn didn't start"))
+        Self(
+            command.process_group(0).spawn().expect("burn didn't start"),
+            Reaped::No,
+        )
     }
 
     fn pid(&self) -> String {
@@ -96,7 +106,11 @@ impl Burn {
     }
 
     fn running(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        let running = matches!(self.0.try_wait(), Ok(None));
+        if !running {
+            self.1 = Reaped::Yes;
+        }
+        running
     }
 
     fn signal(&self, name: &str) {
@@ -118,6 +132,7 @@ impl Burn {
         let started = Instant::now();
         loop {
             if let Some(status) = self.0.try_wait().expect("can't wait for burn") {
+                self.1 = Reaped::Yes;
                 return status;
             }
             assert!(
@@ -133,13 +148,16 @@ impl Burn {
 
 impl Drop for Burn {
     fn drop(&mut self) {
-        // burn leads its group, so the group's id is burn's pid.
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", self.pid())])
-            .stderr(Stdio::null())
-            .status();
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        // Once burn is collected its group's id may be another's, so only an uncollected burn's group is
+        // killed. burn leads its group, so the group's id is burn's pid.
+        if self.1 == Reaped::No {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", self.pid())])
+                .stderr(Stdio::null())
+                .status();
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 }
 
