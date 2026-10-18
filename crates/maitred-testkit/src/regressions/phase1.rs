@@ -721,7 +721,9 @@ fn a_named_victim_whose_holder_is_stopped_gives_way() -> Scenario {
 /// 16384 - 10000 - 6100 = 284 MB available, under `kill_floor`. When a holder decides, the newest copy of its own pass
 /// in the sample can be over 1.2 s old, so a rule judging each pass against the clock excludes every holder and stops
 /// nobody. Judged against the freshest pass, the freshest holder stays a candidate, and one job is stopped within
-/// two storm intervals of the breach and their jitter (2 + 2 × 1.44 s, so 5 s).
+/// two storm intervals of the breach and their jitter (2 + 2 × 1.44 s, so 5 s). Every figure stays in the sample
+/// however old its pass (MT-046), so the candidate furthest over is chosen: `x` when both holders are candidates,
+/// otherwise the freshest holder's job.
 fn a_breach_during_a_swap_storm_still_stops_one_job() -> Scenario {
     Scenario::new(
         "a memory breach during a swap storm that slows every holder still stops exactly one job",
