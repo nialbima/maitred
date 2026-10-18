@@ -160,3 +160,52 @@ fn every_phase_1_findings_line_names_scenarios_that_claim_it() {
         }
     }
 }
+
+#[test]
+fn the_findings_lists_counts_match_its_lines() {
+    const KINDS: [&str; 5] = [
+        "scenario ",
+        "folded into ",
+        "impossible by construction",
+        "not a defect",
+        "out of v1",
+    ];
+    // Each report's row of the Counts table, and the same figures counted from its lines.
+    let mut stated: Vec<(String, Vec<u32>)> = Vec::new();
+    for row in FINDINGS
+        .lines()
+        .filter(|line| line.starts_with("| r") || line.starts_with("| **all"))
+    {
+        let cells: Vec<&str> = row
+            .split('|')
+            .map(|cell| cell.trim().trim_matches('*'))
+            .collect();
+        let figures = cells[2..8]
+            .iter()
+            .map(|cell| cell.parse().unwrap())
+            .collect();
+        stated.push((cells[1].to_string(), figures));
+    }
+    let mut counted: HashMap<String, Vec<u32>> = HashMap::new();
+    for (id, disposition) in finding_lines() {
+        let kind = KINDS
+            .iter()
+            .position(|kind| disposition.starts_with(kind))
+            .unwrap_or_else(|| panic!("{id} has no known disposition: '{disposition}'"));
+        let report = id.split(' ').next().unwrap().to_string();
+        for key in [report, "all".to_string()] {
+            let figures = counted.entry(key).or_insert_with(|| vec![0; 6]);
+            figures[0] += 1;
+            figures[kind + 1] += 1;
+        }
+    }
+
+    assert_eq!(
+        stated.len(),
+        counted.len(),
+        "the table has a row for every report and one for all"
+    );
+    for (report, figures) in stated {
+        assert_eq!(Some(&figures), counted.get(&report), "{report}'s counts");
+    }
+}

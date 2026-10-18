@@ -126,8 +126,8 @@ isn't built yet: this proves the scenario runs, not that it would catch the bug)
       `tests/checker.rs`
 - [ ] The checker's audit cross-check (ARCHITECTURE.md:744): not built; maitred writes no audit entries until
       the store (phase 2)
-- [x] The findings list (`maitred-testkit/FINDINGS.md`): 228 findings, and the counts add up (recounted
-      2026-10-18; no test checks them)
+- [x] The findings list (`maitred-testkit/FINDINGS.md`): 228 findings, and the counts add up
+      (`tests/regressions.rs`, `the_findings_lists_counts_match_its_lines`)
 - [x] Phase 1's regression scenarios (`src/regressions/phase1.rs`), each valid and naming its finding
       (`tests/regressions.rs`)
 - [ ] Every regression scenario runs and fails on its named assertion: waits on the runner
