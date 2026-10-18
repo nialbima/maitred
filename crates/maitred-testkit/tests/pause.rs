@@ -9,7 +9,10 @@ use std::thread;
 
 use maitred_scenario::PausePoint;
 use maitred_testkit::pause::Controller;
-use maitred_testkit::timing::millis;
+use maitred_testkit::timing::{millis, wait_ceiling};
+
+// What must arrive is waited for up to the ceiling, which only a failing test reaches (MT-054). The 50 ms checks that
+// nothing arrives stay short: under load they can only pass wrongly, never fail wrongly.
 
 /// A paused process: connects, writes `line`, and sends back what it read (empty at end of file).
 fn pause_at(socket: &Path, line: &str) -> mpsc::Receiver<String> {
@@ -33,7 +36,7 @@ fn every_point_the_doc_lists_is_held_until_go() {
             &format!("at {} pid 42 ticket t1\n", point.name()),
         );
 
-        let paused = controller.next(millis(2_000)).unwrap();
+        let paused = controller.next(wait_ceiling()).unwrap();
 
         assert_eq!(
             (paused.point, paused.pid, paused.ticket.as_deref()),
@@ -45,7 +48,7 @@ fn every_point_the_doc_lists_is_held_until_go() {
             point.name()
         );
         paused.go().unwrap();
-        assert_eq!(reply.recv_timeout(millis(2_000)).unwrap(), "go\n");
+        assert_eq!(reply.recv_timeout(wait_ceiling()).unwrap(), "go\n");
     }
 }
 
@@ -54,23 +57,23 @@ fn a_process_paused_before_its_ticket_exists_names_none() {
     let controller = Controller::listen().unwrap();
     let _reply = pause_at(controller.path(), "at admit.locked pid 7 ticket -\n");
 
-    assert_eq!(controller.next(millis(2_000)).unwrap().ticket, None);
+    assert_eq!(controller.next(wait_ceiling()).unwrap().ticket, None);
 }
 
 #[test]
 fn several_processes_wait_at_once_and_each_goes_only_when_told() {
     let controller = Controller::listen().unwrap();
     let first = pause_at(controller.path(), "at ticket.written pid 1 ticket a\n");
-    let first_paused = controller.next(millis(2_000)).unwrap();
+    let first_paused = controller.next(wait_ceiling()).unwrap();
     let second = pause_at(controller.path(), "at ticket.written pid 2 ticket b\n");
-    let second_paused = controller.next(millis(2_000)).unwrap();
+    let second_paused = controller.next(wait_ceiling()).unwrap();
 
     second_paused.go().unwrap();
 
-    assert_eq!(second.recv_timeout(millis(2_000)).unwrap(), "go\n");
+    assert_eq!(second.recv_timeout(wait_ceiling()).unwrap(), "go\n");
     assert!(first.recv_timeout(millis(50)).is_err());
     first_paused.go().unwrap();
-    assert_eq!(first.recv_timeout(millis(2_000)).unwrap(), "go\n");
+    assert_eq!(first.recv_timeout(wait_ceiling()).unwrap(), "go\n");
 }
 
 #[test]
@@ -78,9 +81,9 @@ fn a_paused_process_dropped_without_go_reads_end_of_file_and_so_continues() {
     let controller = Controller::listen().unwrap();
     let reply = pause_at(controller.path(), "at stop.marked pid 3 ticket c\n");
 
-    drop(controller.next(millis(2_000)).unwrap());
+    drop(controller.next(wait_ceiling()).unwrap());
 
-    assert_eq!(reply.recv_timeout(millis(2_000)).unwrap(), "");
+    assert_eq!(reply.recv_timeout(wait_ceiling()).unwrap(), "");
 }
 
 #[test]
@@ -88,7 +91,7 @@ fn a_point_the_doc_doesnt_list_is_refused() {
     let controller = Controller::listen().unwrap();
     let _reply = pause_at(controller.path(), "at ticket.before_sync pid 4 ticket d\n");
 
-    let error = controller.next(millis(2_000)).unwrap_err();
+    let error = controller.next(wait_ceiling()).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::InvalidData);
 }
@@ -98,7 +101,7 @@ fn a_line_not_in_the_protocols_shape_is_refused() {
     let controller = Controller::listen().unwrap();
     let _reply = pause_at(controller.path(), "at admit.locked pid four\n");
 
-    let error = controller.next(millis(2_000)).unwrap_err();
+    let error = controller.next(wait_ceiling()).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::InvalidData);
 }

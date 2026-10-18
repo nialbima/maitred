@@ -17,6 +17,18 @@ pub fn burn_duty_period() -> Duration {
     Duration::from_millis(10)
 }
 
+/// How long a test waits for something that must happen before calling it missing. No load on a working machine
+/// comes near it, so only a failing test reaches it; it is there so a hung process fails the test with a message
+/// instead of hanging the run (MT-054).
+#[must_use]
+pub fn wait_ceiling() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// How long a process runs when a test must never see it end by itself: far past `wait_ceiling`, so a test that
+/// waits on it fails at the ceiling rather than passing because time ran out. Tests kill it when they are done.
+pub const OUTLIVE_MS: u64 = 600_000;
+
 /// How often the pause controller looks for a newly paused process while it waits for one.
 #[must_use]
 pub fn pause_accept_retry() -> Duration {

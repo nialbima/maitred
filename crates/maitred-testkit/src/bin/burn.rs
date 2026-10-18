@@ -8,7 +8,8 @@
 //!      [--print-every-ms P] [--port] [--report PATH]
 //!      [--children N --child-run-ms T] [--orphan-child-run-ms T]
 //!      [--daemon setsid|setpgid --daemon-run-ms T [--daemon-report PATH]]
-//!      [--on-term ignore|exit] [--on-int ignore|exit] [--ready PATH]
+//!      [--on-term ignore|exit] [--on-int ignore|exit] [--ready PATH] [--orphan-report PATH]
+//!      [--hold-fill-at-mb N --held PATH] [--until-cpu-ms N]
 //! ```
 //!
 //! Children, orphans and daemons are `burn` again, started with no load of their own and with TERM and INT at
@@ -22,8 +23,14 @@
 //! process that exits at once, so its parent is init, and it has none of the job's stdin, stdout or stderr.
 //!
 //! `--ready PATH` is written once the signal handlers are in, every child has started, the memory is touched and the
-//! spinners run. It lists `pid`, `orphan`, `daemon`, `children` and `resident_mb` in the report's format, so a test
-//! or the runner signals or measures `burn` only once it is ready.
+//! spinners run. It lists `pid`, `orphan`, `daemon`, `children`, `resident_mb` and `ignored` in the report's format,
+//! so a test or the runner signals or measures `burn` only once it is ready. `ignored` names the signals burn
+//! ignores, read back from `sigaction`, which is what a child started without resetting them keeps.
+//!
+//! `--orphan-report PATH` is the orphan's own `--report`. `--hold-fill-at-mb N --held PATH` stops the memory fill
+//! after N megabytes, writes `PATH` and waits there until a signal burn exits on arrives, so a test can signal it
+//! mid-fill; the report's `touched_mb` says how much it filled. `--until-cpu-ms N` ends the run early once burn has
+//! used N ms of CPU, so a test can wait for CPU to be used rather than for time to pass.
 //!
 //! The report's memory figure to compare with a holder's: `peak_footprint_mb` on macOS (it counts compressed
 //! memory, which macOS's accounting does and `ru_maxrss` doesn't), `peak_resident_mb` elsewhere. Resident memory on
@@ -95,6 +102,11 @@ struct Args {
     children_keep_signals: bool,
     /// Set on the short-lived middle process that starts a daemon and exits, so the daemon's parent is init.
     launch_daemon: Option<Detach>,
+    orphan_report: Option<String>,
+    /// Where the fill stops to wait for a signal, and the file it writes when it gets there.
+    hold_fill_at_mb: Option<u64>,
+    held: Option<String>,
+    until_cpu_ms: Option<u64>,
 }
 
 fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -132,8 +144,15 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
             "--on-term" => args.on_term = on_signal(&value()?)?,
             "--on-int" => args.on_int = on_signal(&value()?)?,
             "--detach" => args.detach = Some(detach(&value()?)?),
+            "--orphan-report" => args.orphan_report = Some(value()?),
+            "--hold-fill-at-mb" => args.hold_fill_at_mb = Some(number(&value()?)?),
+            "--held" => args.held = Some(value()?),
+            "--until-cpu-ms" => args.until_cpu_ms = Some(number(&value()?)?),
             _ => return Err(format!("unknown argument {flag}")),
         }
+    }
+    if args.hold_fill_at_mb.is_some() != args.held.is_some() {
+        return Err("--hold-fill-at-mb and --held go together".into());
     }
     Ok(args)
 }
@@ -249,14 +268,23 @@ fn spin(millicores: u64, stop: &Arc<AtomicBool>) -> Vec<thread::JoinHandle<()>> 
 }
 
 /// Allocates `mb` megabytes and fills every byte with varying data, so all of it is resident and none of it
-/// compresses (macOS compresses pages of zeros). Stops early if a signal asked burn to exit.
-fn touch(mb: u64) -> Vec<u8> {
+/// compresses (macOS compresses pages of zeros). Stops early if a signal asked burn to exit, and waits for one
+/// at `hold`'s megabyte after writing its file. Gives the memory and how many megabytes it filled.
+fn touch(mb: u64, hold: Option<(u64, &str)>) -> (Vec<u8>, u64) {
     let mut memory = vec![0_u8; usize::try_from(mb * 1024 * 1024).unwrap_or(usize::MAX)];
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut touched = 0;
     for megabyte in memory.chunks_mut(1024 * 1024) {
+        if let Some((_, path)) = hold.filter(|&(at, _)| at == touched) {
+            write_whole(path, "held\n", "the held file");
+            while !EXIT_REQUESTED.load(Ordering::SeqCst) {
+                thread::sleep(burn_duty_period());
+            }
+        }
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
+        touched += 1;
         for word in megabyte.chunks_mut(8) {
             // xorshift64: cheap, and no two pages alike.
             state ^= state << 13;
@@ -265,7 +293,7 @@ fn touch(mb: u64) -> Vec<u8> {
             word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
         }
     }
-    black_box(memory)
+    (black_box(memory), touched)
 }
 
 /// This process's peak physical footprint in megabytes, the figure macOS's memory accounting uses (it counts
@@ -320,11 +348,34 @@ fn process_ids() -> (u32, i32, i32) {
 
 fn signal_names() -> String {
     let received = RECEIVED.load(Ordering::SeqCst);
-    let names: Vec<&str> = [(GOT_TERM, "TERM"), (GOT_INT, "INT")]
-        .into_iter()
-        .filter(|(bit, _)| received & bit != 0)
-        .map(|(_, name)| name)
-        .collect();
+    or_none(
+        &[(GOT_TERM, "TERM"), (GOT_INT, "INT")]
+            .into_iter()
+            .filter(|(bit, _)| received & bit != 0)
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The signals this process ignores, read back from `sigaction`.
+fn ignored_signals() -> String {
+    or_none(
+        &[(libc::SIGTERM, "TERM"), (libc::SIGINT, "INT")]
+            .into_iter()
+            .filter(|&(signal, _)| {
+                // SAFETY: with no new action, sigaction only reads the current one into `old`, on this stack.
+                unsafe {
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    libc::sigaction(signal, std::ptr::null(), &raw mut old) == 0
+                        && old.sa_sigaction == libc::SIG_IGN
+                }
+            })
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn or_none(names: &[&str]) -> String {
     if names.is_empty() {
         "none".into()
     } else {
@@ -332,7 +383,7 @@ fn signal_names() -> String {
     }
 }
 
-fn report(args: &Args, port: Option<u16>, children: &[u32], orphan: Option<u32>) -> String {
+fn report(args: &Args, port: Option<u16>, ids: &Ids, touched_mb: u64) -> String {
     let (process, group, session) = process_ids();
     let (cpu_ms, resident_mb) = usage();
     let slot = env::var("TEST_ENV_NUMBER").unwrap_or_else(|_| "none".into());
@@ -356,23 +407,29 @@ fn report(args: &Args, port: Option<u16>, children: &[u32], orphan: Option<u32>)
     );
     // SAFETY: getppid only reads the calling process's parent id.
     let _ = writeln!(text, "ppid {}", unsafe { libc::getppid() });
-    let ids: Vec<String> = children.iter().map(ToString::to_string).collect();
+    let children: Vec<String> = ids.children.iter().map(ToString::to_string).collect();
     let _ = writeln!(
         text,
         "children {}",
-        if ids.is_empty() {
-            "none".into()
-        } else {
-            ids.join(",")
-        }
+        or_none(&children.iter().map(String::as_str).collect::<Vec<_>>())
     );
-    let _ = writeln!(
-        text,
-        "orphan {}",
-        orphan.map_or_else(|| "none".into(), |pid| pid.to_string())
-    );
+    let _ = writeln!(text, "orphan {}", pid_or_none(ids.orphan));
+    let _ = writeln!(text, "daemon {}", pid_or_none(ids.daemon));
+    let _ = writeln!(text, "touched_mb {touched_mb}");
     let _ = writeln!(text, "signals {}", signal_names());
+    let _ = writeln!(text, "ignored {}", ignored_signals());
     text
+}
+
+/// The pids a report names besides burn's own.
+struct Ids {
+    children: Vec<u32>,
+    orphan: Option<u32>,
+    daemon: Option<u32>,
+}
+
+fn pid_or_none(pid: Option<u32>) -> String {
+    pid.map_or_else(|| "none".into(), |pid| pid.to_string())
 }
 
 /// Starts the children, the orphan and the daemon `args` ask for. The daemon is started by a middle process that
@@ -382,9 +439,14 @@ fn start_children(args: &Args) -> (Vec<Child>, Option<Child>, Option<u32>) {
     let children = (0..args.children)
         .map(|_| start_burn(args.child_run_ms, &[], keep))
         .collect();
+    let orphan_extra: Vec<&str> = args
+        .orphan_report
+        .iter()
+        .flat_map(|path| ["--report", path.as_str()])
+        .collect();
     let orphan = args
         .orphan_child_run_ms
-        .map(|run_ms| start_burn(run_ms, &[], keep));
+        .map(|run_ms| start_burn(run_ms, &orphan_extra, keep));
     let daemon = args.daemon.and_then(|how| {
         let how = if how == Detach::Session {
             "setsid"
@@ -439,14 +501,11 @@ fn write_ready(path: &str, children: &[Child], orphan: Option<&Child>, daemon: O
         |child: Option<&Child>| child.map_or_else(|| "none".into(), |c| c.id().to_string());
     let ids: Vec<String> = children.iter().map(|c| c.id().to_string()).collect();
     let text = format!(
-        "pid {process}\norphan {}\ndaemon {}\nchildren {}\nresident_mb {resident_mb}\n",
+        "pid {process}\norphan {}\ndaemon {}\nchildren {}\nresident_mb {resident_mb}\nignored {}\n",
         pid_of(orphan),
-        daemon.map_or_else(|| "none".into(), |pid| pid.to_string()),
-        if ids.is_empty() {
-            "none".into()
-        } else {
-            ids.join(",")
-        }
+        pid_or_none(daemon),
+        or_none(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
+        ignored_signals(),
     );
     write_whole(path, &text, "the ready file");
 }
@@ -498,7 +557,7 @@ fn main() -> ExitCode {
         .as_ref()
         .and_then(|l| l.local_addr().ok())
         .map(|a| a.port());
-    let memory = touch(args.mem_mb);
+    let (memory, touched_mb) = touch(args.mem_mb, args.hold_fill_at_mb.zip(args.held.as_deref()));
     let stop = Arc::new(AtomicBool::new(false));
     let spinners = spin(args.cpu_millicores, &stop);
     if let Some(path) = &args.ready {
@@ -518,14 +577,14 @@ fn main() -> ExitCode {
         let next = args.print_every_ms.map(|every| millis(every * (tick + 1)));
         match next {
             Some(at) if at < end => {
-                if !sleep_until(started, at, &mut reap) {
+                if !sleep_until(started, at, args.until_cpu_ms, &mut reap) {
                     break;
                 }
                 tick += 1;
                 println!("{} tick {tick}", args.label_line());
             }
             _ => {
-                sleep_until(started, end, &mut reap);
+                sleep_until(started, end, args.until_cpu_ms, &mut reap);
                 break;
             }
         }
@@ -540,9 +599,13 @@ fn main() -> ExitCode {
         let _ = child.wait();
     }
     reap();
-    let orphan = orphan.as_ref().map(Child::id);
+    let ids = Ids {
+        children: child_ids,
+        orphan: orphan.as_ref().map(Child::id),
+        daemon,
+    };
     if let Some(path) = &args.report {
-        write_whole(path, &report(&args, port, &child_ids, orphan), "the report");
+        write_whole(path, &report(&args, port, &ids, touched_mb), "the report");
     }
     drop(black_box(memory));
     if EXIT_REQUESTED.load(Ordering::SeqCst) {
@@ -553,10 +616,15 @@ fn main() -> ExitCode {
 }
 
 /// Sleeps until `at` after `started`, calling `reap` every duty period and waking early if a signal asked burn
-/// to exit. Returns false if it did.
-fn sleep_until(started: Instant, at: std::time::Duration, reap: &mut impl FnMut()) -> bool {
+/// to exit or it has used `cpu_ms` of CPU. Returns false if it woke early.
+fn sleep_until(
+    started: Instant,
+    at: std::time::Duration,
+    cpu_ms: Option<u64>,
+    reap: &mut impl FnMut(),
+) -> bool {
     while let Some(left) = at.checked_sub(started.elapsed()) {
-        if EXIT_REQUESTED.load(Ordering::SeqCst) {
+        if EXIT_REQUESTED.load(Ordering::SeqCst) || cpu_ms.is_some_and(|ms| usage().0 >= ms) {
             return false;
         }
         reap();

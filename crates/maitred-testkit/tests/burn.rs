@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::{env, fs};
+use std::time::Instant;
+use std::{env, fs, thread};
+
+use maitred_testkit::timing::{OUTLIVE_MS, millis, wait_ceiling};
 
 fn burn(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_burn"));
@@ -153,10 +156,35 @@ fn cpu_ms_for(name: &str, millicores: &str) -> f64 {
 //   heavy cargo nextest run -p maitred-testkit --run-ignored only
 #[test]
 fn one_core_really_spins() {
-    let one = cpu_ms_for("cpu-spins", "1000");
+    // burn ends once it has used 200 ms of CPU, however long a loaded machine takes to give it that; one that didn't
+    // spin would run on to the ceiling (MT-054).
+    let path = report_path("cpu-spins");
+    let mut child = burn(&[
+        "--run-ms",
+        &OUTLIVE_MS.to_string(),
+        "--cpu-millicores",
+        "1000",
+        "--until-cpu-ms",
+        "200",
+        "--report",
+        path.to_str().unwrap(),
+    ])
+    .spawn()
+    .expect("burn didn't start");
+    let started = Instant::now();
+    while child.try_wait().expect("can't wait for burn").is_none() {
+        if started.elapsed() >= wait_ceiling() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("1 core used under 200 ms of CPU in {:?}", wait_ceiling());
+        }
+        thread::sleep(millis(10));
+    }
 
-    // A tenth of the wall time: enough to show it spun even on a machine loaded many times over.
-    assert!(one >= 50.0, "asked for 1 core over 500 ms, used {one} ms");
+    let cpu_ms: u64 = read_report(&path)["cpu_ms"]
+        .parse()
+        .expect("cpu_ms isn't a number");
+    assert!(cpu_ms >= 200, "it ended having used {cpu_ms} ms");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 <!--
-  Synced from the maitred architecture doc on claude.ai (rev 226, 2026-10-17):
+  Synced from the maitred architecture doc on claude.ai (rev 228, 2026-10-17):
   https://claude.ai/code/artifact/00385e4d-eabc-4436-b2d3-6016ffd43e58
   Draft and revise there; this file is regenerated from it, so edits made only here are lost.
   The drawings are docs/modules.svg and docs/ticket-states.svg, exported from the doc's drawings.
@@ -661,7 +661,7 @@ A scenario is a Rust value built with a small DSL: the machine config, the worke
 
 ### Workloads: `burn`
 
-Every job in every scenario is `burn`, so a scenario states exactly what load it creates. `burn` spins N cores and allocates and touches M MB. It can fork children, including short-lived ones and ones whose parent exits first. It can share pages and map files. It can leave a daemon behind with `setsid` or `setpgid`. It ignores or handles TERM and INT, prints on a schedule, holds a port, and reads its slot's variable (`TEST_ENV_NUMBER`). It reports what it actually did, so measurement scenarios compare a holder's figures against the truth.
+Every job in every scenario is `burn`, so a scenario states exactly what load it creates. `burn` spins N cores and allocates and touches M MB. It can fork children, including short-lived ones and ones whose parent exits first. It can share pages and map files. It can leave a daemon behind with `setsid` or `setpgid`. It ignores or handles TERM and INT, prints on a schedule, holds a port, and reads its slot's variable (`TEST_ENV_NUMBER`). It reports what it actually did, so measurement scenarios compare a holder's figures against the truth. So that tests wait for events rather than times, it also reports the signals it ignores (read back from `sigaction`), can stop its memory fill partway and wait there for a signal (`--hold-fill-at-mb`), and can end once it has used a given amount of CPU (`--until-cpu-ms`).
 
 ### Load: `replay`
 
@@ -688,6 +688,8 @@ Already machine config: `sample_interval`, `poll_interval`, `grace`, `settle`, `
 | `load_freshness` | 3 sample intervals | how old `load/now.json` may be before `decide` treats the load as stale and falls back to one job at a time |
 
 Sleep is driven by the trace (`woke_at`, and a sample marked not fresh), not by a clock.
+
+**The test kit's own waits are for events, never for times** (MT-054), so a loaded machine slows a test down but never fails it. A file is waited for while the process that writes it runs: the wait fails at once if the writer ends without writing it. A death is polled for. A process the test must never see end by itself runs for `OUTLIVE_MS` (10 minutes), and is killed when the test ends. Every such wait has one outer limit, `wait_ceiling` (60 s), which no load on a working machine comes near: only a failing test reaches it, and its message names the file and pid it waited on, so a hung process fails the test rather than hanging the run. Both live in the test kit's `timing.rs`. A check that something does *not* happen (a held process gets no reply within 50 ms) stays short, since load can only make it pass wrongly, never fail wrongly.
 
 ### Faults
 

@@ -3,11 +3,15 @@
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Instant;
 use std::{env, fs, thread};
 
-use maitred_testkit::timing::millis;
+use maitred_testkit::timing::{OUTLIVE_MS, millis, wait_ceiling};
+
+// Every wait here is for an event, never for a time: a file waited for is waited for while the process that writes it
+// runs, a death is polled for, and anything that must not end by itself runs for `OUTLIVE_MS`. Only a failing test
+// reaches `wait_ceiling` (MT-054).
 
 fn burn(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_burn"));
@@ -31,16 +35,112 @@ fn read_report(path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
-/// Waits until `path` exists, for up to `limit_ms`.
-fn wait_for(path: &Path, limit_ms: u64) {
+/// Waits until `path` exists. Only `writer` writes it, so the wait lasts while `running` says it runs: it fails at
+/// once if the writer ends without writing the file, and at the ceiling if it runs on and never does.
+fn wait_for(path: &Path, writer: &str, mut running: impl FnMut() -> bool) {
     let started = Instant::now();
     while !path.exists() {
+        if !running() {
+            assert!(
+                path.exists(),
+                "{writer} ended without writing {}",
+                path.display()
+            );
+            return;
+        }
         assert!(
-            started.elapsed() < millis(limit_ms),
-            "{} never appeared",
+            started.elapsed() < wait_ceiling(),
+            "{writer} ran for {:?} without writing {}",
+            wait_ceiling(),
             path.display()
         );
         thread::sleep(millis(10));
+    }
+}
+
+/// Waits until `pid` is gone, failing with `why` at the ceiling.
+fn until_dead(pid: &str, why: &str) {
+    let started = Instant::now();
+    while alive(pid) {
+        assert!(started.elapsed() < wait_ceiling(), "{why} (pid {pid})");
+        thread::sleep(millis(10));
+    }
+}
+
+/// The report `path` once `pid`, which writes it as it ends, has written it.
+fn report_of(path: &Path, pid: &str) -> HashMap<String, String> {
+    wait_for(path, &format!("process {pid}"), || alive(pid));
+    read_report(path)
+}
+
+fn outlive() -> String {
+    OUTLIVE_MS.to_string()
+}
+
+/// A burn this test started. Dropping it kills and collects it, so a test that fails part way leaves nothing
+/// running for `OUTLIVE_MS`.
+struct Burn(Child);
+
+impl Burn {
+    fn start(args: &[&str]) -> Self {
+        Self(burn(args).spawn().expect("burn didn't start"))
+    }
+
+    fn pid(&self) -> String {
+        self.0.id().to_string()
+    }
+
+    fn running(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
+
+    fn signal(&self, name: &str) {
+        let status = Command::new("kill")
+            .args([&format!("-{name}"), &self.pid()])
+            .status();
+        assert!(status.is_ok_and(|s| s.success()), "couldn't send {name}");
+    }
+
+    /// The pids burn listed in its ready file, once it has written it.
+    fn ready(&mut self, path: &Path) -> HashMap<String, String> {
+        let writer = format!("burn {}", self.pid());
+        wait_for(path, &writer, || self.running());
+        read_report(path)
+    }
+
+    /// Waits for burn to end by itself, failing at the ceiling.
+    fn finish(&mut self) -> ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait().expect("can't wait for burn") {
+                return status;
+            }
+            assert!(
+                started.elapsed() < wait_ceiling(),
+                "burn {} ran on for {:?}",
+                self.pid(),
+                wait_ceiling()
+            );
+            thread::sleep(millis(10));
+        }
+    }
+}
+
+impl Drop for Burn {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A process this test knows only by pid (an orphan or a daemon), killed when the test ends if it still runs.
+struct Stray(String);
+
+impl Drop for Stray {
+    fn drop(&mut self) {
+        if alive(&self.0) {
+            let _ = Command::new("kill").args(["-KILL", &self.0]).status();
+        }
     }
 }
 
@@ -50,13 +150,6 @@ fn alive(pid: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
-}
-
-fn signal(child: &Child, name: &str) {
-    let status = Command::new("kill")
-        .args([&format!("-{name}"), &child.id().to_string()])
-        .status();
-    assert!(status.is_ok_and(|s| s.success()), "couldn't send {name}");
 }
 
 #[test]
@@ -96,18 +189,20 @@ fn a_child_whose_parent_exits_first_keeps_running_after_it() {
         "--run-ms",
         "20",
         "--orphan-child-run-ms",
-        "500",
+        &outlive(),
         "--report",
         path.to_str().unwrap(),
     ])
     .status()
     .expect("burn didn't start");
 
-    let orphan = read_report(&path)
-        .get("orphan")
-        .cloned()
-        .expect("no orphan in the report");
-    assert!(alive(&orphan), "the orphan died with its parent");
+    let orphan = Stray(
+        read_report(&path)
+            .get("orphan")
+            .cloned()
+            .expect("no orphan in the report"),
+    );
+    assert!(alive(&orphan.0), "the orphan died with its parent");
 }
 
 #[test]
@@ -128,10 +223,9 @@ fn a_daemon_that_calls_setsid_leads_a_session_of_its_own() {
     ])
     .status()
     .expect("burn didn't start");
-    wait_for(&daemon_path, 2_000);
 
     let parent = read_report(&path);
-    let daemon = read_report(&daemon_path);
+    let daemon = report_of(&daemon_path, &parent["daemon"]);
     assert_eq!(
         daemon.get("sid"),
         daemon.get("pid"),
@@ -158,10 +252,9 @@ fn a_daemon_that_calls_setpgid_leaves_the_group_but_not_the_session() {
     ])
     .status()
     .expect("burn didn't start");
-    wait_for(&daemon_path, 2_000);
 
     let parent = read_report(&path);
-    let daemon = read_report(&daemon_path);
+    let daemon = report_of(&daemon_path, &parent["daemon"]);
     assert_eq!(
         daemon.get("pgid"),
         daemon.get("pid"),
@@ -178,7 +271,7 @@ fn a_daemon_that_calls_setpgid_leaves_the_group_but_not_the_session() {
 fn with_term_ignored_it_runs_on_to_its_own_end() {
     let path = report_path("term-ignore");
     let ready = report_path("term-ignore-ready");
-    let child = burn(&[
+    let mut child = Burn::start(&[
         "--run-ms",
         "400",
         "--on-term",
@@ -189,39 +282,31 @@ fn with_term_ignored_it_runs_on_to_its_own_end() {
         path.to_str().unwrap(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    ready_pids(&ready);
-    signal(&child, "TERM");
-    let output = child.wait_with_output().expect("burn didn't finish");
+    ]);
+    child.ready(&ready);
+    child.signal("TERM");
 
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(child.finish().code(), Some(3));
 }
 
 #[test]
 fn with_term_handled_it_exits_cleanly_at_once_and_says_so() {
     let path = report_path("term-exit");
     let ready = report_path("term-exit-ready");
-    let started = Instant::now();
-    let child = burn(&[
+    let mut child = Burn::start(&[
         "--run-ms",
-        "5000",
+        &outlive(),
         "--on-term",
         "exit",
         "--report",
         path.to_str().unwrap(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    ready_pids(&ready);
-    signal(&child, "TERM");
-    let output = child.wait_with_output().expect("burn didn't finish");
+    ]);
+    child.ready(&ready);
+    child.signal("TERM");
 
-    assert_eq!(output.status.code(), Some(0));
-    assert!(started.elapsed() < millis(2_000), "it ran on after TERM");
+    assert_eq!(child.finish().code(), Some(0));
     assert_eq!(read_report(&path).get("signals"), Some(&"TERM".to_string()));
 }
 
@@ -229,126 +314,108 @@ fn with_term_handled_it_exits_cleanly_at_once_and_says_so() {
 fn with_int_handled_it_records_the_signal_the_same_way() {
     let path = report_path("int-exit");
     let ready = report_path("int-exit-ready");
-    let child = burn(&[
+    let mut child = Burn::start(&[
         "--run-ms",
-        "5000",
+        &outlive(),
         "--on-int",
         "exit",
         "--report",
         path.to_str().unwrap(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    ready_pids(&ready);
-    signal(&child, "INT");
-    let output = child.wait_with_output().expect("burn didn't finish");
+    ]);
+    child.ready(&ready);
+    child.signal("INT");
 
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(child.finish().code(), Some(0));
     assert_eq!(read_report(&path).get("signals"), Some(&"INT".to_string()));
 }
 
 #[test]
 fn by_default_term_kills_it() {
     let ready = report_path("default-term-ready");
-    let child = burn(&["--run-ms", "5000", "--ready", ready.to_str().unwrap()])
-        .spawn()
-        .expect("burn didn't start");
-    ready_pids(&ready);
-    signal(&child, "TERM");
-    let output = child.wait_with_output().expect("burn didn't finish");
+    let mut child = Burn::start(&["--run-ms", &outlive(), "--ready", ready.to_str().unwrap()]);
+    child.ready(&ready);
+    child.signal("TERM");
 
-    assert_eq!(output.status.signal(), Some(15));
-}
-
-/// The pids burn listed in its ready file, once it has written it.
-fn ready_pids(path: &Path) -> HashMap<String, String> {
-    wait_for(path, 2_000);
-    read_report(path)
+    assert_eq!(child.finish().signal(), Some(15));
 }
 
 #[test]
 fn a_ready_file_appears_once_its_signal_handlers_are_in() {
     let ready = report_path("ready");
-    let mut child = burn(&[
+    let mut child = Burn::start(&[
         "--run-ms",
-        "5000",
+        &outlive(),
         "--on-term",
         "exit",
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let pids = ready_pids(&ready);
-    signal(&child, "TERM");
-    let status = child.wait().expect("burn didn't finish");
+    ]);
+    let pids = child.ready(&ready);
+    child.signal("TERM");
 
-    assert_eq!(pids.get("pid"), Some(&child.id().to_string()));
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(pids.get("pid"), Some(&child.pid()));
+    assert_eq!(child.finish().code(), Some(0));
 }
 
 #[test]
 fn an_ignored_term_isnt_passed_on_to_the_children_it_starts() {
     let ready = report_path("ignore-inherit");
-    let mut parent = burn(&[
+    let mut parent = Burn::start(&[
         "--run-ms",
-        "3000",
+        &outlive(),
         "--on-term",
         "ignore",
         "--orphan-child-run-ms",
-        "5000",
+        &outlive(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let orphan = ready_pids(&ready)
-        .get("orphan")
-        .cloned()
-        .expect("no orphan in the ready file");
+    ]);
+    let orphan = Stray(
+        parent
+            .ready(&ready)
+            .get("orphan")
+            .cloned()
+            .expect("no orphan in the ready file"),
+    );
 
     let killed = Command::new("kill")
-        .args(["-TERM", &orphan])
+        .args(["-TERM", &orphan.0])
         .status()
         .expect("kill didn't run");
-    thread::sleep(millis(300));
 
     // burn collects a child as soon as it exits, so a child TERM killed is gone, not a zombie.
     assert!(killed.success());
-    assert!(!alive(&orphan), "the child kept burn's ignored TERM");
-    let _ = parent.kill();
-    let _ = parent.wait();
+    until_dead(&orphan.0, "the child kept burn's ignored TERM");
 }
 
 #[test]
 fn a_child_that_finishes_mid_run_doesnt_linger_as_a_zombie() {
     let ready = report_path("reaped");
-    let mut parent = burn(&[
+    let mut parent = Burn::start(&[
         "--run-ms",
-        "1500",
+        &outlive(),
         "--orphan-child-run-ms",
         "100",
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let orphan = ready_pids(&ready)
+    ]);
+    let orphan = parent
+        .ready(&ready)
         .get("orphan")
         .cloned()
         .expect("no orphan in the ready file");
 
-    // The child has been gone for 500 ms while burn still runs. `kill -0` succeeds on a zombie and fails on a
-    // process its parent has collected, so finding nothing means burn collected it.
-    thread::sleep(millis(600));
-    let lingering = alive(&orphan);
-    let _ = parent.wait();
-
+    // `kill -0` succeeds on a zombie and fails on a process its parent has collected, so the child disappearing
+    // while burn still runs means burn collected it.
+    until_dead(
+        &orphan,
+        "the finished child was left a zombie while burn ran on",
+    );
     assert!(
-        !lingering,
-        "the finished child was left a zombie while burn ran on"
+        parent.running(),
+        "burn ended, so init may have collected it"
     );
 }
 
@@ -364,40 +431,38 @@ fn printing_every_zero_milliseconds_is_refused() {
 #[test]
 fn an_ignored_int_isnt_passed_on_to_the_children_it_starts() {
     let ready = report_path("ignore-int-inherit");
-    let mut parent = burn(&[
+    let mut parent = Burn::start(&[
         "--run-ms",
-        "3000",
+        &outlive(),
         "--on-int",
         "ignore",
         "--orphan-child-run-ms",
-        "5000",
+        &outlive(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let orphan = ready_pids(&ready)
-        .get("orphan")
-        .cloned()
-        .expect("no orphan in the ready file");
+    ]);
+    let orphan = Stray(
+        parent
+            .ready(&ready)
+            .get("orphan")
+            .cloned()
+            .expect("no orphan in the ready file"),
+    );
 
     let killed = Command::new("kill")
-        .args(["-INT", &orphan])
+        .args(["-INT", &orphan.0])
         .status()
         .expect("kill didn't run");
-    thread::sleep(millis(300));
 
     assert!(killed.success());
-    assert!(!alive(&orphan), "the child kept burn's ignored INT");
-    let _ = parent.kill();
-    let _ = parent.wait();
+    until_dead(&orphan.0, "the child kept burn's ignored INT");
 }
 
 #[test]
 fn the_ready_file_comes_after_the_memory_is_touched_and_names_the_daemon() {
     let ready = report_path("ready-late");
     let daemon_report = report_path("ready-late-daemon");
-    let mut parent = burn(&[
+    let mut parent = Burn::start(&[
         "--run-ms",
         "1000",
         "--mem-mb",
@@ -410,11 +475,9 @@ fn the_ready_file_comes_after_the_memory_is_touched_and_names_the_daemon() {
         daemon_report.to_str().unwrap(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let pids = ready_pids(&ready);
-    let _ = parent.wait();
+    ]);
+    let pids = parent.ready(&ready);
+    parent.finish();
 
     assert!(
         pids.get("daemon").is_some_and(|pid| pid != "none"),
@@ -429,30 +492,32 @@ fn the_ready_file_comes_after_the_memory_is_touched_and_names_the_daemon() {
 }
 
 #[test]
-fn a_handled_term_ends_the_memory_fill_promptly() {
-    let armed = report_path("armed");
-    let mut child = burn(&[
+fn a_handled_term_ends_the_memory_fill_where_it_is() {
+    let held = report_path("held");
+    let path = report_path("held-report");
+    let mut child = Burn::start(&[
         "--run-ms",
-        "20000",
+        &outlive(),
         "--mem-mb",
-        "1500",
+        "256",
+        "--hold-fill-at-mb",
+        "64",
+        "--held",
+        held.to_str().unwrap(),
         "--on-term",
         "exit",
-        "--armed",
-        armed.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    wait_for(&armed, 2_000);
-    let sent = Instant::now();
-    signal(&child, "TERM");
-    let status = child.wait().expect("burn didn't finish");
+        "--report",
+        path.to_str().unwrap(),
+    ]);
+    let writer = format!("burn {}", child.pid());
+    wait_for(&held, &writer, || child.running());
+    child.signal("TERM");
 
-    assert_eq!(status.code(), Some(0));
-    assert!(
-        sent.elapsed() < millis(300),
-        "TERM took {:?} to end the fill",
-        sent.elapsed()
+    assert_eq!(child.finish().code(), Some(0));
+    assert_eq!(
+        read_report(&path).get("touched_mb").map(String::as_str),
+        Some("64"),
+        "the fill went on after TERM"
     );
 }
 
@@ -473,34 +538,34 @@ fn a_reader_that_goes_away_kills_it_by_sigpipe_as_it_would_any_program() {
 #[test]
 fn children_can_keep_its_ignored_term_as_a_nohup_child_would() {
     let ready = report_path("keep-signals");
-    let mut parent = burn(&[
+    let orphan_report = report_path("keep-signals-orphan");
+    let mut parent = Burn::start(&[
         "--run-ms",
-        "3000",
+        &outlive(),
         "--on-term",
         "ignore",
         "--children-keep-signals",
         "--orphan-child-run-ms",
-        "5000",
+        "0",
+        "--orphan-report",
+        orphan_report.to_str().unwrap(),
         "--ready",
         ready.to_str().unwrap(),
-    ])
-    .spawn()
-    .expect("burn didn't start");
-    let orphan = ready_pids(&ready)
+    ]);
+    let orphan = parent
+        .ready(&ready)
         .get("orphan")
         .cloned()
         .expect("no orphan in the ready file");
 
-    Command::new("kill")
-        .args(["-TERM", &orphan])
-        .status()
-        .expect("kill didn't run");
-    thread::sleep(millis(300));
-
-    assert!(alive(&orphan), "the child didn't keep the ignored TERM");
-    let _ = Command::new("kill").args(["-KILL", &orphan]).status();
-    let _ = parent.kill();
-    let _ = parent.wait();
+    // The child reports the signals it ignores, read back from sigaction, rather than surviving a TERM for a while.
+    assert_eq!(
+        report_of(&orphan_report, &orphan)
+            .get("ignored")
+            .map(String::as_str),
+        Some("TERM"),
+        "the child didn't keep the ignored TERM"
+    );
 }
 
 #[test]
@@ -521,10 +586,9 @@ fn a_daemon_is_not_burns_child() {
     ])
     .status()
     .expect("burn didn't start");
-    wait_for(&daemon_path, 3_000);
 
     let parent = read_report(&path);
-    let daemon = read_report(&daemon_path);
+    let daemon = report_of(&daemon_path, &parent["daemon"]);
     let daemon_parent = daemon.get("ppid").expect("no ppid in the daemon's report");
     assert_ne!(
         Some(daemon_parent),
