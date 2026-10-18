@@ -11,7 +11,9 @@
 # count only once `git add -N` has told git about them). --since REF tests what differs from REF
 # instead (CI passes the commit before a push). --all tests every mutant in the crate.
 # --crate picks the package (default maitred-core), so every crate's run gets the same limits.
-# Other arguments go to cargo-mutants. Results land in mutants.out/ as usual.
+# Other arguments go to cargo-mutants. Each run's results land in a directory of its own,
+# mutants.out/<crate>-<time>/mutants.out, so runs by two sessions in one checkout don't overwrite
+# each other; the last line says where.
 #
 # MAITRED_MUTANTS_MEMORY (default 4g) and MAITRED_MUTANTS_CPUS (default 3) size the container.
 set -euo pipefail
@@ -62,6 +64,10 @@ fi
 # real init at pid 1, which collects orphans the way a machine's does; without one, a killed orphan stays
 # a zombie and still answers `kill -0`. cargo-mutants is installed once into a volume; the registry is
 # cached in another.
+run_dir="mutants.out/$crate-$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$run_dir"
+
+status=0
 docker run --rm --init \
   --memory="$memory" --memory-swap="$memory" --cpus="$cpus" \
   -v "$PWD:/src" -w /src \
@@ -76,5 +82,9 @@ docker run --rm --init \
     fi
     crate=$1
     shift
-    exec /tools/bin/cargo-mutants mutants --package "$crate" --jobs 2 "$@"
-  ' bin/mutants "$crate" ${args[@]+"${args[@]}"}
+    output=$1
+    shift
+    exec /tools/bin/cargo-mutants mutants --package "$crate" --jobs 2 --output "$output" "$@"
+  ' bin/mutants "$crate" "/src/$run_dir" ${args[@]+"${args[@]}"} || status=$?
+echo "bin/mutants: results in $run_dir/mutants.out" >&2
+exit "$status"
