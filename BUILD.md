@@ -131,7 +131,8 @@ isn't built yet: this proves the scenario runs, not that it would catch the bug)
 - [x] Phase 1's regression scenarios (`src/regressions/phase1.rs`), each valid and naming its finding
       (`tests/regressions.rs`)
 - [ ] Every regression scenario runs and fails on its named assertion: waits on the runner
-- [ ] MT-048: reshape the near-tie scenario so it fails without the victim file, and sweep its seeds
+- [ ] MT-048: the near-tie scenario, reshaped to fail without the victim file (`54090ed`); its seed sweep
+      waits on the simulator
 - [ ] `replay`: only its `load/now.json` writer exists (`maitred-testkit/src/load_file.rs`, `8c40286`)
 - [ ] The runner for both targets
 
