@@ -653,6 +653,20 @@ fn a_named_quiet_victim_is_not_kept_when_the_breach_is_no_longer_critical() {
 }
 
 #[test]
+fn a_named_quiet_victim_is_kept_while_the_breach_is_critical() {
+    let mut snap = snapshot(vec![
+        running("quiet", Class::Quiet, 1_000),
+        running("heavy", Class::Heavy, 60_000),
+    ]);
+    snap.named_victim = Some(id("quiet"));
+
+    assert_eq!(
+        choose_victim(&snap, Trigger::Memory { critical: true }),
+        Some(id("quiet"))
+    );
+}
+
+#[test]
 fn a_named_victim_within_its_reservation_still_stands() {
     // Recency alone would take the heavy job; the light job was named first and isn't quiet.
     let mut snap = snapshot(vec![

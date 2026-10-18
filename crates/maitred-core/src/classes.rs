@@ -278,12 +278,15 @@ fn millicores(value: &str) -> Option<u64> {
     if !digits(whole) || !digits(fraction) || fraction.len() > 3 {
         return None;
     }
-    let padded = format!("{fraction:0<3}");
+    // At most three digits, checked above, padded to thousandths.
+    let thousandths = format!("{fraction:0<3}")
+        .bytes()
+        .fold(0, |n, digit| n * 10 + u64::from(digit - b'0'));
     let millis = whole
         .parse::<u64>()
         .ok()?
         .checked_mul(1_000)?
-        .checked_add(padded.parse::<u64>().ok()?)?;
+        .checked_add(thousandths)?;
     (millis > 0).then_some(millis)
 }
 

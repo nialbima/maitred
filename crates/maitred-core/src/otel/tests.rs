@@ -162,6 +162,17 @@ fn sixty_four_bit_integers_are_read_as_numbers_too() {
 }
 
 #[test]
+fn an_integer_written_as_neither_a_string_nor_a_number_is_refused() {
+    for value in [r#""asInt":true"#, r#""asInt":[5]"#, r#""asInt":null"#] {
+        assert!(
+            the_point(&point_line("1", value, r#"{"stringValue":"v"}"#)).is_err(),
+            "{value}"
+        );
+    }
+    assert!(the_point(&point_line("{}", r#""asInt":5"#, r#"{"stringValue":"v"}"#)).is_err());
+}
+
+#[test]
 fn an_integer_out_of_range_is_refused() {
     assert!(
         the_point(&point_line(

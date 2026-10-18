@@ -255,7 +255,16 @@ fn an_options_bad_value_is_invalid() {
         ("cpu", "two"),
         ("cpu", "+1"),
         ("cpu", "1."),
+        ("cpu", "1.x"),
+        // Too large for a count of millicores: as a number at all, times 1,000, and plus the
+        // fraction.
+        ("cpu", "99999999999999999999"),
+        ("cpu", "18446744073709552"),
+        ("cpu", "18446744073709551.999"),
         ("mem", "+3M"),
+        // Too large for a count of megabytes: as a number at all, and times 1,024.
+        ("mem", "99999999999999999999M"),
+        ("mem", "18014398509481984G"),
         ("mem", "0M"),
         ("mem", "3"),
         ("mem", "3T"),
