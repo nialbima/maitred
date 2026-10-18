@@ -47,23 +47,23 @@ pub(crate) const SHELLS: [&str; 3] = ["sh", "bash", "zsh"];
 /// Classifies a job's argv: steps 1 to 7 of Matching.
 #[must_use]
 pub fn classify<'a>(file: &'a ClassFile, job: &Job, machine: &Machine) -> Classified<'a> {
-    // 1. Wrappers, repeatedly; 2. the program normalised; 3. launchers, then normalised again.
-    let Stripped {
-        mut words,
-        dir,
-        escalated,
-    } = strip_wrappers(job.argv.clone(), &machine.wrappers, &job.cwd);
-    if let Some(via) = escalated {
-        return Classified::Escalated { via };
-    }
-    normalise_program(&mut words, &dir, &job.root);
+    // 1. Wrappers, repeatedly; 2. the program normalised; 3. launchers and the wrappers after
+    // them, then normalised again.
+    let mut stripped = strip_wrappers(job.argv.clone(), &machine.wrappers, &job.cwd);
+    normalise_program(&mut stripped.words, &stripped.dir, &job.root);
     if let Some(launcher) = machine
         .launchers
         .iter()
-        .find(|l| !l.is_empty() && words.starts_with(l))
+        .find(|l| !l.is_empty() && stripped.words.starts_with(l))
     {
-        words.drain(..launcher.len());
-        normalise_program(&mut words, &dir, &job.root);
+        stripped = stripped.past_launcher(launcher.len(), &machine.wrappers);
+        normalise_program(&mut stripped.words, &stripped.dir, &job.root);
+    }
+    let Stripped {
+        words, escalated, ..
+    } = stripped;
+    if let Some(via) = escalated {
+        return Classified::Escalated { via };
     }
     let Some(program) = words.first() else {
         return Classified::NoRule {
@@ -143,6 +143,19 @@ pub(crate) struct Stripped {
     pub(crate) dir: String,
     /// The wrapper that runs it as another user (`sudo`, `doas`), if one does.
     pub(crate) escalated: Option<String>,
+}
+
+impl Stripped {
+    /// Drops a launcher of `len` words from the front, then the wrappers after it: a launcher runs
+    /// its next word as a command, so a wrapper there wraps the program (MT-049).
+    pub(crate) fn past_launcher(mut self, len: usize, extra: &[String]) -> Self {
+        self.words.drain(..len);
+        let after = strip_wrappers(self.words, extra, &self.dir);
+        Self {
+            escalated: self.escalated.or(after.escalated),
+            ..after
+        }
+    }
 }
 
 /// Whether `command`'s options include `v` or `V`.

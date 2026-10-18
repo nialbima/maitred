@@ -711,19 +711,20 @@ impl Spotter<'_, '_> {
             .iter()
             .map(|w| w.text.clone())
             .collect();
-        let Stripped {
-            words: mut stripped,
-            dir: runs_in,
-            escalated,
-        } = strip_wrappers(texts, &self.machine.wrappers, &place.dir);
+        let mut stripped = strip_wrappers(texts, &self.machine.wrappers, &place.dir);
         if let Some(launcher) = self
             .machine
             .launchers
             .iter()
-            .find(|l| !l.is_empty() && stripped.starts_with(l))
+            .find(|l| !l.is_empty() && stripped.words.starts_with(l))
         {
-            stripped.drain(..launcher.len());
+            stripped = stripped.past_launcher(launcher.len(), &self.machine.wrappers);
         }
+        let Stripped {
+            words: stripped,
+            dir: runs_in,
+            escalated,
+        } = stripped;
         let mut script = None;
         if let Some(program) = stripped.first() {
             let from_root = self.path_from_root(program);

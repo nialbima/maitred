@@ -169,6 +169,19 @@ fn launchers_are_stripped_after_normalising_and_the_program_normalised_again() {
 }
 
 #[test]
+fn wrappers_after_a_launcher_are_stripped_too() {
+    // A launcher runs its next word as a command, so a wrapper there wraps the program (Nick,
+    // 2026-10-17, MT-049).
+    for argv in [
+        &["bundle", "exec", "nice", "-n", "5", "bin/x"][..],
+        &["npx", "FOO=1", "timeout", "10", "./bin/x"],
+        &["nice", "bundle", "exec", "with-lock", "bin/x"],
+    ] {
+        assert_eq!(command(argv), "bin/x", "{argv:?}");
+    }
+}
+
+#[test]
 fn a_launcher_only_counts_whole() {
     assert_eq!(command(&["bundle", "install"]), "bundle install");
     assert_eq!(command(&["ruby", "bin/x"]), "ruby bin/x");
@@ -414,6 +427,9 @@ fn a_job_run_through_sudo_or_doas_is_refused() {
         (&["/usr/bin/sudo", "-E", "-u", "nick", "bin/x"][..], "sudo"),
         (&["nice", "doas", "-n", "bin/x"][..], "doas"),
         (&["sudo", "-l"][..], "sudo"),
+        (&["bundle", "exec", "sudo", "bin/x"][..], "sudo"),
+        (&["sudo", "bundle", "exec", "bin/x"][..], "sudo"),
+        (&["npx", "nice", "doas", "bin/x"][..], "doas"),
     ] {
         assert!(
             matches!(classify(&f, &job(argv), &machine()), Classified::Escalated { via: v } if v == via),

@@ -705,6 +705,21 @@ fn a_program_behind_sudo_or_doas_is_spotted_and_marked_escalated() {
 }
 
 #[test]
+fn wrappers_after_a_launcher_are_skipped_and_sudo_there_still_escalates() {
+    // Nick, 2026-10-17 (MT-049).
+    let spotted = spot(
+        "bundle exec nice bin/x; bundle exec sudo bin/y",
+        CWD,
+        &machine(),
+    );
+    let found: Vec<(&str, Option<&str>)> = spotted
+        .iter()
+        .map(|s| (s.program.as_str(), s.escalated.as_deref()))
+        .collect();
+    assert_eq!(found, [("bin/x", None), ("bin/y", Some("sudo"))]);
+}
+
+#[test]
 fn a_program_in_the_script_of_an_escalated_shell_is_escalated_too() {
     for script in ["sudo bash -c 'bin/x'", "sudo bash <<'EOF'\nbin/x\nEOF"] {
         let x = spot(script, CWD, &machine())
