@@ -129,6 +129,14 @@ pub(crate) fn strip_wrappers(mut words: Vec<String>, extra: &[String], cwd: &str
             escalated = Some(name.to_owned());
         }
         let (rest, chdir) = grammar.strip(&words);
+        // Each round takes at least the wrapper's own name, and `env -S` only drops quotes and
+        // spaces as it splits, so the words' total length always shrinks. A round that didn't would
+        // strip the same wrapper for ever on a command an agent typed: a panic is the lesser failure.
+        let length = |w: &[String]| w.iter().map(String::len).sum::<usize>();
+        assert!(
+            length(&rest) < length(&words),
+            "a wrapper's grammar took nothing from {words:?}"
+        );
         if let Some(chdir) = chdir {
             dir = resolve(&dir, &chdir);
         }
@@ -222,7 +230,12 @@ impl Grammar {
                 i += 1;
                 break;
             }
-            if !word.starts_with('-') || (word == "-" && !self.dash) {
+            // env's lone `-` is its -i, and comes after its options: it ends them (MT-057).
+            if word == "-" && self.dash {
+                i += 1;
+                break;
+            }
+            if !word.starts_with('-') || word == "-" {
                 break;
             }
             if let Some(with_value) = self.words_with_value {

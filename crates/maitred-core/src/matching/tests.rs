@@ -183,6 +183,8 @@ fn env_takes_a_lone_dash_as_its_dash_i() {
     // MT-057: env(1), "accepts the - option as a synonym for -i".
     assert_eq!(command(&["env", "-", "bin/x"]), "bin/x");
     assert_eq!(command(&["env", "-", "A=1", "bin/x"]), "bin/x");
+    // It comes after env's options and ends them: what follows is the command (Qualmaude's S5).
+    assert_eq!(command(&["env", "-", "-u", "FOO", "bin/x"]), "-u FOO bin/x");
     // To any other wrapper a lone `-` is no option: it ends them, and is the program.
     assert_eq!(command(&["nice", "-", "x"]), "- x");
 }
