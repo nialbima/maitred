@@ -84,9 +84,10 @@ the core.
 - [x] Every line, region, function and branch of the core runs in a test (`3564c67`)
 - [x] Mutants on every change so far: none missed
 - [ ] A whole-crate mutants run with none missed (`bin/mutants --all`, or CI's weekly run)
-- [ ] MT-046, which `maitred-sim` needs: a sample copies each job's latest figure whatever its age, its age
-      being the sample's time less its holder's pass (item 2, Nick 2026-10-18: doc and a `Load.jobs` comment,
-      no new field); the order among equally-over candidates (item 1) and the jitter's direction (item 3)
+- [x] MT-046, which `maitred-sim` needs (arch rev 243, `snapshot.rs`): a sample copies each job's latest figure
+      however old, its age the sample's time less its holder's pass; equally-over candidates go to the most
+      recently admitted, then the smallest id (what `victim.rs` already did); a poll's jitter only lengthens
+      it, up to 20% (Nick 2026-10-18). Entry still open until its receipt
 - [ ] `maitred-sim`, taking the test kit's scenarios, with the `decide` micro-benchmark (C1 in the performance
       plan). The scenario DSL and the `Publisher` it reads load from are in `maitred-scenario` (phase 2b);
       nothing in the test kit holds it up

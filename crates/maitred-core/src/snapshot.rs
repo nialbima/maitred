@@ -127,10 +127,11 @@ pub struct Load {
     pub over_cpu_streak: u32,
     /// Consecutive samples over `gpu_kill_ceiling`, counted the same way.
     pub over_gpu_streak: u32,
-    /// Each running job's use, as the sampler copied it from the job's holder. Only measurements
-    /// whose window overlaps the sample's own interval are copied.
+    /// Each running job's use, as its holder last wrote it, however old: the sampler copies the
+    /// latest until the holder writes the next (MT-046). A figure's age is `sampled_at` less the
+    /// job's `holder_passes` entry.
     pub jobs: BTreeMap<TicketId, Resources>,
-    /// When each running job's holder last started a pass, copied from its use file whatever the
-    /// use's window (MT-043). None for a job whose holder hasn't passed yet.
+    /// When each running job's holder last started a pass, from the same use file as its figure
+    /// (MT-043). None for a job whose holder hasn't passed yet.
     pub holder_passes: BTreeMap<TicketId, BootTime>,
 }
