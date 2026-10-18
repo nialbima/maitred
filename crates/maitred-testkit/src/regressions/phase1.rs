@@ -635,18 +635,21 @@ fn a_stopped_head_lapses_once_a_new_arrival_has_waited_a_stall_limit() -> Scenar
 
 /// MT-034 (ARCHITECTURE rev 150, Kill policy step 2): the first holder to choose for a breach names the victim, and
 /// later holders keep the name while it stands. `x` and `y` reserve 1000 MB and use 3000 and 3100 MB in opposite
-/// phase, swapping every sample, so each sample names the other as furthest over (both stay over, so under Rule B
-/// the name stands). Outside load reaches 10000 MB at 2 s: 16384 - 10000 - 6100 = 284 MB available, under
-/// `kill_floor` (512). A holder passes every poll interval with up to 20% jitter, so the first chooser names a
-/// victim by about 2.24 s and the victim's holder acts on its next pass, by about 2.48 s. Without the name, two holders
-/// reading alternate samples each name the other and neither acts.
+/// phase, swapping every 500 ms; both stay over, so under Rule B the name stands. Outside load reaches 10000 MB at
+/// 2 s: 16384 - 10000 - 6100 = 284 MB available, under `kill_floor` (512). Holders pass every 400 ms with up to 20%
+/// jitter, so by 2.48 s each has passed once since the breach. With the name, the first chooser's victim is stopped
+/// by then: by its own holder on that pass, or by the other's, which keeps the name.
 ///
-/// Whether that livelock happens depends on the holders' phases, so the seed must be one whose rhythm gives it; it
-/// is pinned when the simulator runs and the scenario is shown to fail with the name taken out (MT-034).
+/// Without the name it is late, not lost (MT-048). Each sample carries a job's figure from its holder's last pass,
+/// however old (MT-046), so each holder's view of its own job is a pass behind the other's, and across one 500 ms
+/// flip both can see the other job as furthest over. A paper model of these rules (maitred-research
+/// spikes/2026-10-17-kill-policy-timing-model) has that on about 23% of seeds (15% if jitter can also shorten a
+/// pass), each killed by about 2.9 s. So the scenario is checked over a sweep of seeds, not one pinned seed, for
+/// that share failing with the name taken out and none failing with it.
 fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
     Scenario::new(
-        "two near-tied jobs whose order flips every sample lose exactly one, promptly",
-        MachineConfig::for_tests(),
+        "two near-tied jobs whose order flips between holder passes lose exactly one, promptly",
+        MachineConfig::for_tests().poll_interval(ms(400)),
     )
     .checks("MT-034")
     .load(Sample::at(ms(0)))
@@ -656,7 +659,7 @@ fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
         Job::new("x", Class::Light)
             .reserves(500, 1_000)
             .uses(500, 3_000)
-            .alternates_with(ms(200), 500, 3_100)
+            .alternates_with(ms(500), 500, 3_100)
             .runs_for(secs(30)),
     )
     .arrive(
@@ -664,13 +667,13 @@ fn near_tied_jobs_whose_order_flips_lose_exactly_one_promptly() -> Scenario {
         Job::new("y", Class::Light)
             .reserves(500, 1_000)
             .uses(500, 3_100)
-            .alternates_with(ms(200), 500, 3_000)
+            .alternates_with(ms(500), 500, 3_000)
             .runs_for(secs(30)),
     )
     .expect(Expect::one_killed_by(
         &["x", "y"],
         Trigger::Memory,
-        ms(2_500),
+        ms(2_480),
     ))
     .expect(Expect::at_most_kills(Trigger::Memory, 1))
     .run_until(secs(4))
