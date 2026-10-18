@@ -157,6 +157,25 @@ struct Heredoc {
     body: usize,
 }
 
+/// Every loop that reads `s` byte by byte moves on at each step. One that didn't would spin on the
+/// same byte for ever, or push tokens without end, on a string an agent typed; the hook runs on
+/// every command, so a panic is the lesser failure.
+fn moved_on(from: usize, to: usize, s: &str) {
+    assert!(
+        to > from,
+        "the spotter read nothing at byte {from} of {s:?}"
+    );
+}
+
+/// Where the spaces and tabs from `i` end.
+fn past_blanks(bytes: &[u8], i: usize) -> usize {
+    i + bytes.get(i..).map_or(0, |rest| {
+        rest.iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count()
+    })
+}
+
 /// The tokens of `s`, and the bodies its `Token::Heredoc`s index.
 fn lex(s: &str) -> (Vec<Token>, Vec<Body>) {
     let bytes = s.as_bytes();
@@ -187,11 +206,7 @@ fn lex(s: &str) -> (Vec<Token>, Vec<Body>) {
                     i = end;
                 }
             }
-            b'#' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
+            b'#' => i = s[i..].find('\n').map_or(s.len(), |n| i + n),
             b';' => {
                 // `;;&` lexes as `;;` and then `&`, which a case's patterns ignore.
                 let (op, len) = match bytes.get(i + 1) {
@@ -223,10 +238,8 @@ fn lex(s: &str) -> (Vec<Token>, Vec<Body>) {
                 i = end;
             }
         }
-        // Every byte `word` stops at needs an arm above. A step that read nothing would push
-        // tokens for ever on a string an agent typed, and the hook runs on every command: a panic
-        // is the lesser failure.
-        assert!(i > at, "the lexer read nothing at byte {at} of {s:?}");
+        // Every byte `word` stops at needs an arm above.
+        moved_on(at, i, s);
     }
     (tokens, bodies)
 }
@@ -265,10 +278,7 @@ fn redirection(
         end
     } else if s[i..].starts_with("<<") {
         let strip_tabs = bytes.get(i + 2) == Some(&b'-');
-        i += if strip_tabs { 3 } else { 2 };
-        while matches!(bytes.get(i), Some(b' ' | b'\t')) {
-            i += 1;
-        }
+        i = past_blanks(bytes, i + if strip_tabs { 3 } else { 2 });
         let (word, end) = word(s, i);
         let raw = &s[word.span.clone()];
         heredocs.push(Heredoc {
@@ -302,11 +312,9 @@ fn redirect_target(s: &str, i: usize, tokens: &mut Vec<Token>) -> usize {
 }
 
 /// The word a redirection's operator ending at `i` takes, if one follows, and where it ends.
-fn target(s: &str, mut i: usize) -> (Option<Word>, usize) {
+fn target(s: &str, i: usize) -> (Option<Word>, usize) {
     let bytes = s.as_bytes();
-    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
-        i += 1;
-    }
+    let i = past_blanks(bytes, i);
     if i >= bytes.len() || b"\n;&|()<>".contains(&bytes[i]) {
         return (None, i);
     }
@@ -325,6 +333,7 @@ fn heredoc_body(
     // substitutions are looked for inside it alone, each once.
     let mut i = start;
     let (end, span) = loop {
+        let at = i;
         if i >= s.len() {
             break (s.len(), start..s.len());
         }
@@ -340,12 +349,14 @@ fn heredoc_body(
             break (next, start..i);
         }
         i = next;
+        moved_on(at, i, s);
     };
     let mut substitutions = Vec::new();
     if !heredoc.quoted {
         let body = &s[span.clone()];
         let mut j = 0;
         while j < body.len() {
+            let at = j;
             match body.as_bytes()[j] {
                 b'\\' => j += 2,
                 b'$' if body[j..].starts_with("$(") => {
@@ -361,6 +372,7 @@ fn heredoc_body(
                 }
                 _ => j += 1,
             }
+            moved_on(at, j, body);
         }
     }
     (end, span, substitutions)
@@ -380,6 +392,7 @@ fn word(s: &str, start: usize) -> (Word, usize) {
     let mut quoted_name = false;
     let mut i = start;
     while i < bytes.len() {
+        let at = i;
         match bytes[i] {
             b' ' | b'\t' | b'\r' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>' => break,
             b'\\' => {
@@ -404,7 +417,9 @@ fn word(s: &str, start: usize) -> (Word, usize) {
                 quoted_name = true;
                 let mut j = i + 2;
                 while j < bytes.len() && bytes[j] != b'\'' {
+                    let at = j;
                     j += if bytes[j] == b'\\' { 2 } else { 1 };
+                    moved_on(at, j, s);
                 }
                 let close = j.min(s.len());
                 w.text.push_str(&s[i + 2..close]);
@@ -442,6 +457,7 @@ fn word(s: &str, start: usize) -> (Word, usize) {
                 i += c.len_utf8();
             }
         }
+        moved_on(at, i, s);
     }
     w.span.end = i;
     (w, i)
@@ -458,6 +474,7 @@ fn push_output(w: &mut Word, substitution: &str) {
 fn double_quoted(s: &str, mut i: usize, w: &mut Word) -> usize {
     let bytes = s.as_bytes();
     while i < bytes.len() {
+        let at = i;
         match bytes[i] {
             b'"' => return i + 1,
             b'\\' => {
@@ -498,6 +515,7 @@ fn double_quoted(s: &str, mut i: usize, w: &mut Word) -> usize {
                 i += c.len_utf8();
             }
         }
+        moved_on(at, i, s);
     }
     s.len()
 }
@@ -519,6 +537,7 @@ fn closing_paren(s: &str, mut i: usize) -> usize {
                 .is_none_or(|c| b" \t\n;&|)".contains(c))
     };
     while i < bytes.len() {
+        let at = i;
         if starts_word(i) {
             if is_word(i, "case") {
                 cases.push(depth);
@@ -547,6 +566,7 @@ fn closing_paren(s: &str, mut i: usize) -> usize {
             _ => {}
         }
         i += 1;
+        moved_on(at, i, s);
     }
     s.len()
 }
@@ -555,11 +575,13 @@ fn closing_paren(s: &str, mut i: usize) -> usize {
 fn closing_backquote(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     while i < bytes.len() {
+        let at = i;
         match bytes[i] {
             b'\\' => i += 2,
             b'`' => return i,
             _ => i += 1,
         }
+        moved_on(at, i, s);
     }
     s.len()
 }

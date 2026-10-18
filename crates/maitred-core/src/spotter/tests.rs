@@ -116,6 +116,43 @@ fn a_substitution_in_a_redirections_target_runs_with_its_command() {
 }
 
 #[test]
+fn a_cd_to_a_variable_leaves_the_directory_be() {
+    assert_eq!(
+        programs_in("cd $DIR; bin/x").last().unwrap(),
+        &("bin/x".into(), "/work/app".into())
+    );
+}
+
+#[test]
+fn an_ansi_c_quoted_word_ends_at_its_quote_and_an_escaped_one_doesnt_end_it() {
+    assert_eq!(programs("$'bin/x' run"), ["bin/x"]);
+    assert_eq!(programs("echo $'a' 'b'; bin/x"), ["echo", "bin/x"]);
+    assert_eq!(programs("echo $'it\\'s'; bin/x"), ["echo", "bin/x"]);
+}
+
+#[test]
+fn only_an_unquoted_name_before_the_first_equals_makes_an_assignment() {
+    // In A=1=2 the name is A and its value 1=2. 'A'=1 is no assignment, so the refusal doesn't move it
+    // after `env` (what matching then makes of it is MT-058).
+    assert_eq!(programs("A=1=2 bin/x"), ["bin/x"]);
+    assert_eq!(
+        suggestion("'A'=1 bin/mutant run", "bin/mutant", None),
+        "maitred -- 'A'=1 bin/mutant run"
+    );
+}
+
+#[test]
+#[should_panic(expected = "the spotter read nothing at byte 3")]
+fn a_scan_that_doesnt_move_on_panics_rather_than_spinning() {
+    moved_on(3, 3, "echo");
+}
+
+#[test]
+fn a_scan_that_moves_on_passes() {
+    moved_on(3, 4, "echo");
+}
+
+#[test]
 fn a_redirection_with_no_target_takes_nothing() {
     // Not valid shell, but the spotter reads it without failing.
     assert_eq!(programs("a >"), ["a"]);
