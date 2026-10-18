@@ -23,8 +23,8 @@ fn running_jobs_add_their_use_to_the_background_load() {
     let load_file = publisher.publish(
         &sample,
         &[
-            Running::measured("a", job(2_000, 1_024)),
-            Running::measured("b", job(500, 512)),
+            Running::new("a", job(2_000, 1_024)),
+            Running::new("b", job(500, 512)),
         ],
         None,
     );
@@ -38,7 +38,7 @@ fn cpu_used_stops_at_capacity_and_the_excess_shows_as_runnable_work_per_core() {
     let mut publisher = Publisher::new(&machine());
     let sample = Sample::at(ms(200)).background(12_000, 0);
 
-    let load_file = publisher.publish(&sample, &[Running::measured("a", job(4_000, 0))], None);
+    let load_file = publisher.publish(&sample, &[Running::new("a", job(4_000, 0))], None);
 
     assert_eq!(load_file.cpu_used_millicores, 8_000);
     // 16 cores of demand on 8 cores is 2 runnable tasks per core.
@@ -50,22 +50,39 @@ fn available_memory_never_goes_below_zero() {
     let mut publisher = Publisher::new(&machine());
     let sample = Sample::at(ms(200)).background(0, 16_000);
 
-    let load_file = publisher.publish(&sample, &[Running::measured("a", job(0, 4_096))], None);
+    let load_file = publisher.publish(&sample, &[Running::new("a", job(0, 4_096))], None);
 
     assert_eq!(load_file.mem_available_mb, 0);
 }
 
 #[test]
-fn each_running_job_is_listed_with_its_declared_use() {
+fn a_jobs_figure_is_what_its_holder_last_measured_not_what_it_uses_now() {
     let mut publisher = Publisher::new(&machine());
 
     let load_file = publisher.publish(
         &Sample::at(ms(200)),
-        &[Running::measured("a", job(2_000, 1_024))],
+        &[Running::new("a", job(2_000, 3_000)).holder_passed(ms(150), job(2_000, 1_024))],
         None,
     );
 
     assert_eq!(load_file.jobs, vec![("a".to_string(), job(2_000, 1_024))]);
+    // The machine's own figures see what it uses now.
+    assert_eq!(load_file.mem_available_mb, 16_384 - 3_000);
+}
+
+#[test]
+fn a_holders_last_measurement_stays_in_the_sample_however_old() {
+    let mut publisher = Publisher::new(&machine());
+
+    // Ten sample intervals since the holder's last pass (Nick, MT-046: until it writes the next one).
+    let load_file = publisher.publish(
+        &Sample::at(ms(2_100)),
+        &[Running::new("a", job(500, 64)).holder_passed(ms(100), job(500, 64))],
+        None,
+    );
+
+    assert_eq!(load_file.jobs, vec![("a".to_string(), job(500, 64))]);
+    assert_eq!(load_file.holder_passes, vec![("a".to_string(), ms(100))]);
 }
 
 #[test]
@@ -143,12 +160,12 @@ fn a_reading_the_sample_marks_missing_is_published_as_missing() {
 }
 
 #[test]
-fn a_job_whose_use_cant_be_measured_loads_the_machine_but_isnt_listed() {
+fn a_job_whose_holder_hasnt_passed_loads_the_machine_but_isnt_listed() {
     let mut publisher = Publisher::new(&machine());
 
     let load_file = publisher.publish(
         &Sample::at(ms(200)),
-        &[Running::unmeasured("a", job(2_000, 1_024))],
+        &[Running::new("a", job(2_000, 1_024))],
         None,
     );
 
@@ -164,9 +181,13 @@ fn maitreds_running_threads_sum_the_measured_jobs_threads() {
     let load_file = publisher.publish(
         &Sample::at(ms(200)),
         &[
-            Running::measured("a", job(2_000, 0)).threads(3),
-            Running::measured("b", job(500, 0)).threads(1),
-            Running::unmeasured("c", job(4_000, 0)).threads(4),
+            Running::new("a", job(2_000, 0))
+                .holder_passed(ms(100), job(2_000, 0))
+                .threads(3),
+            Running::new("b", job(500, 0))
+                .holder_passed(ms(100), job(500, 0))
+                .threads(1),
+            Running::new("c", job(4_000, 0)).threads(4),
         ],
         None,
     );
@@ -251,9 +272,13 @@ fn a_missing_gpu_reading_counts_toward_no_gpu_streak() {
 fn on_macos_the_cpu_streak_counts_maitreds_running_threads_while_the_cpu_is_saturated() {
     let mut publisher = Publisher::new(&machine().on_macos());
     // 40 threads on 8 cores is 5 per core, over the threads kill ceiling of 2, and the jobs saturate the CPU.
-    let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
+    let busy = [Running::new("a", job(8_000, 0))
+        .holder_passed(ms(100), job(8_000, 0))
+        .threads(40)];
     // The same threads with the CPU not saturated don't count.
-    let idle_cpu = [Running::measured("a", job(2_000, 0)).threads(40)];
+    let idle_cpu = [Running::new("a", job(2_000, 0))
+        .holder_passed(ms(100), job(2_000, 0))
+        .threads(40)];
 
     let saturated = publisher.publish(&Sample::at(ms(200)), &busy, None);
     let unsaturated = publisher.publish(&Sample::at(ms(400)), &idle_cpu, None);
@@ -283,7 +308,7 @@ fn a_linux_machine_publishes_the_traces_stall_and_its_jobs_add_none() {
 
     let load_file = publisher.publish(
         &Sample::at(ms(200)).stall(500),
-        &[Running::measured("a", job(16_000, 0))],
+        &[Running::new("a", job(16_000, 0))],
         None,
     );
 
@@ -329,7 +354,7 @@ fn a_job_counts_its_cpu_use_as_running_threads_in_thousandths() {
     // 1100 millicores is about 1.1 running threads, not 2; eight such jobs are 8.8 threads on 8 cores.
     let jobs: Vec<Running> = ["a", "b", "c", "d", "e", "f", "g", "h"]
         .into_iter()
-        .map(|label| Running::measured(label, job(1_100, 0)))
+        .map(|label| Running::new(label, job(1_100, 0)).holder_passed(ms(100), job(1_100, 0)))
         .collect();
 
     let load_file = publisher.publish(&Sample::at(ms(200)), &jobs, None);
@@ -350,7 +375,9 @@ fn stall_just_over_the_kill_ceiling_counts_as_over() {
 #[test]
 fn on_macos_a_missing_cpu_reading_counts_toward_no_cpu_streak() {
     let mut publisher = Publisher::new(&machine().on_macos());
-    let busy = [Running::measured("a", job(8_000, 0)).threads(40)];
+    let busy = [Running::new("a", job(8_000, 0))
+        .holder_passed(ms(100), job(8_000, 0))
+        .threads(40)];
 
     let load_file = publisher.publish(&Sample::at(ms(200)).missing(Reading::Cpu), &busy, None);
 
@@ -383,15 +410,15 @@ fn a_gap_within_load_freshness_keeps_the_streak() {
 }
 
 #[test]
-fn every_holder_that_has_passed_is_in_the_sample_measured_or_not() {
+fn every_holder_that_has_passed_is_in_the_sample() {
     let mut publisher = Publisher::new(&machine());
 
     let load_file = publisher.publish(
         &Sample::at(ms(400)),
         &[
-            Running::measured("a", job(500, 64)).holder_passed(ms(350)),
-            Running::unmeasured("b", job(500, 64)).holder_passed(ms(120)),
-            Running::measured("c", job(500, 64)),
+            Running::new("a", job(500, 64)).holder_passed(ms(350), job(500, 64)),
+            Running::new("b", job(500, 64)).holder_passed(ms(120), job(500, 64)),
+            Running::new("c", job(500, 64)),
         ],
         None,
     );

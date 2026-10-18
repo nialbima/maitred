@@ -30,7 +30,8 @@ pub struct Job {
     pub runs_for: Ms,
     /// The status it exits with when it finishes on its own.
     pub exit_status: u8,
-    /// Whether its holder's measurement reaches the sample (see [`crate::Running`]).
+    /// Whether its holder's measurements reach the sample. A real job lacks a figure only before its holder's first
+    /// pass (see [`crate::Running`]); `false` holds that state for the whole run.
     pub measured: bool,
     /// Its running threads, as its holder counts them into `maitred_running_threads` on macOS; `None` means its
     /// CPU use, as threads in thousandths.
@@ -115,7 +116,7 @@ impl Job {
         self
     }
 
-    /// Makes its use unmeasurable: it still loads the machine, but no figure for it reaches the sample.
+    /// Keeps its figure out of every sample, as before its holder's first pass: it still loads the machine.
     #[must_use]
     pub fn unmeasured(mut self) -> Self {
         self.measured = false;

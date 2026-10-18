@@ -22,7 +22,7 @@ pub use class_case::{
 pub use expect::{Expect, Failure};
 pub use fault::{Fault, Process, Signal};
 pub use job::{Class, Job};
-pub use load::{Published, Publisher, Reading, Running, Sample};
+pub use load::{HolderPass, Published, Publisher, Reading, Running, Sample};
 pub use machine::{Amount, ClassConfig, MachineConfig, Platform, Pool};
 pub use outcome::{End, Outcome, Trigger};
 pub use pause::PausePoint;

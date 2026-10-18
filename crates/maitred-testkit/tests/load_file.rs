@@ -33,7 +33,7 @@ fn publish(sample: &Sample, machine: &MachineConfig) -> maitred_scenario::Publis
     };
     publisher.publish(
         sample,
-        &[Running::measured("a", a).holder_passed(sample.at - ms(100))],
+        &[Running::new("a", a).holder_passed(sample.at - ms(100), a)],
         None,
     )
 }

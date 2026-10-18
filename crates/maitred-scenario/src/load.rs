@@ -93,24 +93,42 @@ impl Sample {
     }
 }
 
+/// A holder's pass: when it started and the use it measured, both written to `tickets/<id>.use`
+/// (ARCHITECTURE.md: tickets).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HolderPass {
+    pub at: Ms,
+    pub measured: Amount,
+}
+
 /// A job running when a sample is taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running<'a> {
     pub label: &'a str,
-    /// What it uses; it loads the machine whether or not it is measured.
+    /// What it uses at the sample's moment, which is what the machine's figures see.
     pub uses: Amount,
-    /// Whether its holder's figure reaches the sample. An unmeasured job counts in the machine's figures but
-    /// isn't listed under `jobs`, so admission charges it its whole reservation.
-    pub measured: bool,
-    /// Its running threads in thousandths, summed into `maitred_running_threads` when it is measured. By default its
-    /// CPU use: a job using 1100 millicores has about 1.1 threads running.
+    /// Its running threads in thousandths, summed into `maitred_running_threads` once its holder has passed. By
+    /// default its CPU use: a job using 1100 millicores has about 1.1 threads running.
     pub threads_milli: u32,
-    /// When its holder last started a pass; `None` before its first. The sampler copies it into every sample
-    /// (`holder_passes`), measured or not, so holders can tell one that has stopped passing (ARCHITECTURE rev 172).
-    pub holder_pass: Option<Ms>,
+    /// Its holder's latest pass before the sample; `None` before its first. The sample copies what that pass
+    /// measured into `jobs` however old it is, until the holder writes the next (Nick, MT-046), and its start into
+    /// `holder_passes`, so the figure's age is `sampled_at` less that start. A job with no pass yet counts in the
+    /// machine's figures but isn't listed under `jobs`, so admission charges it its whole reservation.
+    pub last_pass: Option<HolderPass>,
 }
 
 impl<'a> Running<'a> {
+    /// A job whose holder hasn't passed yet.
+    #[must_use]
+    pub fn new(label: &'a str, uses: Amount) -> Self {
+        Self {
+            label,
+            uses,
+            threads_milli: uses.cpu_millicores,
+            last_pass: None,
+        }
+    }
+
     /// Sets its running threads, in whole threads.
     #[must_use]
     pub fn threads(mut self, threads: u32) -> Self {
@@ -118,33 +136,11 @@ impl<'a> Running<'a> {
         self
     }
 
-    /// Sets when its holder last started a pass.
+    /// Sets its holder's latest pass: when it started, and the use it measured then.
     #[must_use]
-    pub fn holder_passed(mut self, at: Ms) -> Self {
-        self.holder_pass = Some(at);
+    pub fn holder_passed(mut self, at: Ms, measured: Amount) -> Self {
+        self.last_pass = Some(HolderPass { at, measured });
         self
-    }
-
-    #[must_use]
-    pub fn measured(label: &'a str, uses: Amount) -> Self {
-        Self {
-            label,
-            uses,
-            measured: true,
-            threads_milli: uses.cpu_millicores,
-            holder_pass: None,
-        }
-    }
-
-    #[must_use]
-    pub fn unmeasured(label: &'a str, uses: Amount) -> Self {
-        Self {
-            label,
-            uses,
-            measured: false,
-            threads_milli: uses.cpu_millicores,
-            holder_pass: None,
-        }
     }
 }
 
@@ -172,7 +168,7 @@ pub struct Published {
     pub quiet_streak: u32,
     pub over_cpu_streak: u32,
     pub over_gpu_streak: u32,
-    /// Each running job's use, by label.
+    /// Each running job's use as its holder last measured it, by label, for every job whose holder has passed.
     pub jobs: Vec<(String, Amount)>,
     /// When each running job's holder last started a pass, by label, for every job whose holder has passed.
     pub holder_passes: Vec<(String, Ms)>,
@@ -271,7 +267,7 @@ impl Publisher {
         };
         let measured_threads_milli = running
             .iter()
-            .filter(|job| job.measured)
+            .filter(|job| job.last_pass.is_some())
             .fold(0_u32, |sum, job| sum.saturating_add(job.threads_milli));
         let over_cpu = match self.platform {
             // macOS: maitred's own running threads per core, counted only while CPU use is known and at capacity.
@@ -319,12 +315,11 @@ impl Publisher {
             over_gpu_streak: self.over_gpu_streak,
             jobs: running
                 .iter()
-                .filter(|job| job.measured)
-                .map(|job| (job.label.to_string(), job.uses))
+                .filter_map(|job| Some((job.label.to_string(), job.last_pass?.measured)))
                 .collect(),
             holder_passes: running
                 .iter()
-                .filter_map(|job| Some((job.label.to_string(), job.holder_pass?)))
+                .filter_map(|job| Some((job.label.to_string(), job.last_pass?.at)))
                 .collect(),
             missing: sample.missing.clone(),
         }

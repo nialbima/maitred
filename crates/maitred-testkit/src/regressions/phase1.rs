@@ -73,8 +73,8 @@ fn excess_use_isnt_given_back() -> Scenario {
     .expect(Expect::admitted("b"))
 }
 
-/// `a` reserves 6000 MB and uses 500, but no figure for it reaches the sample, so `used` is 0 and it is
-/// charged all 6000. Free memory is 16384 - 500 - 6000 = 9884 MB, short of `b`'s 10000. Charging `a` only
+/// `a` reserves 6000 MB and uses 500, but no figure for it reaches the sample (as before its holder's first pass,
+/// held here for its whole run), so `used` is 0 and it is charged all 6000. Free memory is 16384 - 500 - 6000 = 9884 MB, short of `b`'s 10000. Charging `a` only
 /// what it uses would leave 16384 - 500 - 5500 = 10384, and `b` would start beside it.
 fn unmeasured_job_holds_its_whole_reservation() -> Scenario {
     Scenario::new(
