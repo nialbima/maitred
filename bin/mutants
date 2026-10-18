@@ -20,7 +20,9 @@ cd "$(dirname "$0")/.."
 
 memory=${MAITRED_MUTANTS_MEMORY:-4g}
 cpus=${MAITRED_MUTANTS_CPUS:-3}
-image=rust:1.98-slim
+# The full image, not -slim: the test kit runs `kill`, which -slim lacks, and without it every check that a
+# process died passes whatever happened.
+image=rust:1.98
 cargo_mutants_version=27.1.0
 
 all=false
@@ -56,9 +58,11 @@ if [ "$all" = false ]; then
   args=(--in-diff /in.diff ${args[@]+"${args[@]}"})
 fi
 
-# No swap beyond the memory limit, so a runaway mutant is killed rather than paged out. cargo-mutants
-# is installed once into a volume; the registry is cached in another.
-docker run --rm \
+# No swap beyond the memory limit, so a runaway mutant is killed rather than paged out. --init puts a
+# real init at pid 1, which collects orphans the way a machine's does; without one, a killed orphan stays
+# a zombie and still answers `kill -0`. cargo-mutants is installed once into a volume; the registry is
+# cached in another.
+docker run --rm --init \
   --memory="$memory" --memory-swap="$memory" --cpus="$cpus" \
   -v "$PWD:/src" -w /src \
   -v "$diff_file:/in.diff:ro" \

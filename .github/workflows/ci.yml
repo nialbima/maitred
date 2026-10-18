@@ -79,5 +79,6 @@ jobs:
       - run: |
           limits="${{ matrix.limits }}"
           [ "$limits" = none ] && limits=""
-          docker run --rm $limits -v "$PWD:/src" -w /src rust:1 \
+          # --init collects orphans as a machine's init does; without it a killed orphan stays a zombie.
+          docker run --rm --init $limits -v "$PWD:/src" -w /src rust:1 \
             bash -c 'cargo install --locked cargo-nextest && cargo nextest run --workspace --locked --no-tests=pass'
