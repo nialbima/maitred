@@ -111,6 +111,11 @@ fn a_redirection_target_is_never_a_program() {
 }
 
 #[test]
+fn a_substitution_in_a_redirections_target_runs_with_its_command() {
+    assert_eq!(programs("a > $(bin/x); b"), ["a", "bin/x", "b"]);
+}
+
+#[test]
 fn a_redirection_with_no_target_takes_nothing() {
     // Not valid shell, but the spotter reads it without failing.
     assert_eq!(programs("a >"), ["a"]);
@@ -458,6 +463,35 @@ fn popd_returns_to_the_directory_pushd_left() {
 }
 
 #[test]
+fn a_cd_pushd_or_popd_whose_destination_it_cant_tell_leaves_the_directory_be() {
+    // A bare cd goes home and a bare pushd swaps the top two; `cd ''` stays put; `popd +1` drops
+    // a stack entry without moving.
+    for (script, dir) in [
+        ("cd; bin/x", "/work/app"),
+        ("pushd; bin/x", "/work/app"),
+        ("cd ''; bin/x", "/work/app"),
+        ("pushd /a; popd +1; bin/x", "/a"),
+    ] {
+        assert_eq!(
+            programs_in(script).last().unwrap(),
+            &("bin/x".into(), dir.into()),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_launcher_in_the_machine_config_matches_nothing() {
+    let mut machine = machine();
+    machine.launchers.insert(0, vec![]);
+    let found: Vec<String> = spot("bundle exec bin/x", CWD, &machine)
+        .into_iter()
+        .map(|s| s.program)
+        .collect();
+    assert_eq!(found, ["bin/x"]);
+}
+
+#[test]
 fn popd_with_nothing_pushed_leaves_the_directory_be() {
     assert_eq!(
         programs_in("cd sub; popd; bin/x").last().unwrap(),
@@ -475,9 +509,15 @@ fn a_subshells_pushd_ends_with_the_subshell() {
 
 #[test]
 fn a_rooted_path_is_normalised_and_one_leaving_the_project_is_not_rooted() {
-    let inside = spot("$(repo-root)/lib/../bin/x", CWD, &machine());
-    assert!(inside[0].rooted);
-    assert_eq!(inside[0].program, "bin/x");
+    for path in [
+        "$(repo-root)/lib/../bin/x",
+        "$(repo-root)/./bin/x",
+        "$(repo-root)//bin//x",
+    ] {
+        let inside = spot(path, CWD, &machine());
+        assert!(inside[0].rooted, "{path}");
+        assert_eq!(inside[0].program, "bin/x", "{path}");
+    }
 
     let outside = spot("$(repo-root)/../other/bin/x", CWD, &machine());
     assert!(!outside[0].rooted, "{outside:?}");
@@ -561,6 +601,31 @@ fn an_escaped_dollar_in_a_heredoc_starts_no_substitution() {
     assert_eq!(
         programs("cat <<EOF\n\\$(bin/x) $(bin/y)\nEOF"),
         ["cat", "bin/y"]
+    );
+}
+
+#[test]
+fn a_substitution_over_several_lines_of_a_heredoc_is_read_once() {
+    assert_eq!(
+        programs("cat <<EOF\n$(echo a\necho $(bin/x))\nEOF"),
+        ["cat", "echo", "echo", "bin/x"]
+    );
+}
+
+#[test]
+fn a_variable_in_a_heredoc_starts_no_substitution() {
+    assert_eq!(
+        programs("cat <<EOF\n$v bin/x\n$(bin/y)\nEOF"),
+        ["cat", "bin/y"]
+    );
+}
+
+#[test]
+fn an_unclosed_substitution_ends_with_its_heredoc() {
+    // The delimiter line ends the heredoc whatever is open in it, so bin/y is a command of its own.
+    assert_eq!(
+        programs("cat <<EOF\n$(bin/x\nEOF\nbin/y"),
+        ["cat", "bin/x", "bin/y"]
     );
 }
 
@@ -650,6 +715,20 @@ fn an_unterminated_quote_or_substitution_runs_to_the_end() {
 }
 
 #[test]
+fn a_case_inside_parentheses_in_a_substitution_doesnt_end_it_early() {
+    // MT-056: the pattern's `)` closes the pattern, never the subshell around the case. In double
+    // quotes, anything a substitution ended too early would leave out is text, not commands.
+    assert_eq!(
+        programs("echo \"$( (case $v in x) bin/a ;; esac); bin/b)\""),
+        ["echo", "bin/a", "bin/b"]
+    );
+    assert_eq!(
+        programs("echo \"$(case $v in x) (bin/a) ;; esac; bin/b)\""),
+        ["echo", "bin/a", "bin/b"]
+    );
+}
+
+#[test]
 fn a_substitution_where_a_case_pattern_has_no_room_for_one_is_still_spotted() {
     // Not valid shell, but the spotter errs toward spotting.
     assert_eq!(programs("case $v in a <<< $(bin/x)) ;; esac"), ["bin/x"]);
@@ -677,12 +756,107 @@ fn a_here_string_fed_to_a_shell_is_spotted_as_its_script() {
         programs("bash <<< 'bin/x run && bin/y'"),
         ["bash", "bin/x", "bin/y"]
     );
-    assert_eq!(programs("sh <<< \"$(bin/x)\""), ["sh", "bin/x"]);
+    assert_eq!(programs("sh <<< \"$(bin/x)\""), ["sh", OUTPUT, "bin/x"]);
     assert_eq!(programs("bash run.sh <<< 'bin/x'"), ["bash"]);
     assert_eq!(
         suggestion("bash <<< 'bin/mutant run'", "bin/mutant", None),
         "maitred -- bash <<< 'bin/mutant run'"
     );
+}
+
+// A shell's script is built by the shell that starts it, which runs the substitutions in it first: those are the
+// caller's, and the script is read with each one's output standing in (Nick, 2026-10-17, MT-050).
+
+/// Each program with the text of the simple command a refusal would replace, and its escalation.
+fn credited(script: &str) -> Vec<(String, String, Option<String>)> {
+    spot(script, CWD, &machine())
+        .into_iter()
+        .map(|s| (s.program, script[s.span].to_owned(), s.escalated))
+        .collect()
+}
+
+#[test]
+fn a_substitution_in_an_unquoted_heredoc_a_shell_reads_is_the_callers() {
+    let script = "bash <<EOF\necho $(bin/x)\nEOF";
+    assert_eq!(
+        credited(script),
+        [
+            ("bash".into(), "bash".into(), None),
+            ("echo".into(), "bash".into(), None),
+            ("bin/x".into(), "bin/x".into(), None),
+        ]
+    );
+    assert_eq!(
+        suggestion(script, "bin/x", None),
+        "bash <<EOF\necho $(maitred -- bin/x)\nEOF"
+    );
+    // The output stands in for the whole substitution, its `)` too, so `arg` stays its argument.
+    assert_eq!(
+        programs("bash <<EOF\n$(bin/x) arg\nEOF"),
+        ["bash", OUTPUT, "bin/x"]
+    );
+}
+
+#[test]
+fn a_substitution_the_caller_runs_isnt_escalated_by_the_sudo_its_output_goes_to() {
+    for script in [
+        "sudo bash <<EOF\n$(bin/x)\nEOF",
+        "sudo bash -c \"$(bin/x)\"",
+        "sudo bash <<< \"$(bin/x)\"",
+    ] {
+        let x = spot(script, CWD, &machine())
+            .into_iter()
+            .find(|s| s.program == "bin/x")
+            .unwrap();
+        assert_eq!(x.escalated, None, "{script}");
+        assert_eq!(&script[x.span], "bin/x", "{script}");
+    }
+}
+
+#[test]
+fn a_dash_c_strings_substitution_is_spotted_once_as_the_callers() {
+    let script = "bash -c \"$(bin/x) --flag\"";
+    assert_eq!(
+        credited(script),
+        [
+            ("bash".into(), script.into(), None),
+            (OUTPUT.into(), script.into(), None),
+            ("bin/x".into(), "bin/x".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn a_script_with_an_expansion_in_it_is_still_read() {
+    for script in [
+        "bash -c \"cd $DIR && bin/x\"",
+        "bash <<< \"cd $DIR && bin/x\"",
+    ] {
+        assert_eq!(programs(script), ["bash", "cd", "bin/x"], "{script}");
+    }
+    // `$v` is a program nobody can name until it runs; bin/x is its argument.
+    assert_eq!(programs("bash -c \"$v bin/x\""), ["bash", "$v"]);
+}
+
+#[test]
+fn a_substitution_the_outer_shell_doesnt_run_is_left_to_the_script() {
+    // Single quotes, a quoted delimiter and an escaped dollar all hand `$(…)` to the inner shell as text.
+    for script in [
+        "bash -c 'echo $(bin/x)'",
+        "bash <<'EOF'\necho $(bin/x)\nEOF",
+        "bash -c \"echo \\$(bin/x)\"",
+    ] {
+        let spotted = spot(script, CWD, &machine());
+        let span_of = |program: &str| {
+            spotted
+                .iter()
+                .find(|s| s.program == program)
+                .unwrap()
+                .span
+                .clone()
+        };
+        assert_eq!(span_of("bin/x"), span_of("bash"), "{script}");
+    }
 }
 
 // sudo and doas (Nick, 2026-10-17).

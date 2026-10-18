@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 1ce084fa20e54c87dbacd791747464c3fa36af86f21f086769667279f4c53ff3 # shrinks to s = Script { text: "echo $(case $v in x|y) bin/a ;; esac)", programs: ["echo", "bin/a"] }
 cc e72dd32f9a28f90f63e787f92d4747e042de7853def749a9bd8a9601e357252f # shrinks to s = Script { text: "echo $(( bin/a ))", programs: ["echo", "bin/a"] }
+cc 6b3269727b2d39ffe47fe80fac793690e513c5668367bd13e54bd838680c01d6 # shrinks to pieces = ["<<", "\n", "$(", "\n", "$("]
+cc f5a7a5881fbe2ac78610ab095e20ccb2915bcdb1e3d8bea3eba1455af681c257 # shrinks to s = Script { text: "echo \"$(while ( case $v in\nx) bin/a ;; esac ); do bin/a; done)\"", programs: ["echo", "bin/a", "bin/a"] }

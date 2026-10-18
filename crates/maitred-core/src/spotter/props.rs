@@ -161,6 +161,29 @@ proptest! {
         prop_assert_eq!(spotted(&format!("bash <<'EOF'\n{}\nEOF", s.text)), expected);
     }
 
+    /// The spotter finishes on any string, however broken: the hook runs it on whatever an agent
+    /// typed, and one that never finished would hang the call and grow without bound. Its lexer
+    /// asserts it moved on at every step, so a regression panics here instead of looping.
+    #[test]
+    fn any_string_is_read_to_its_end(
+        pieces in proptest::collection::vec(
+            prop_oneof![
+                Just(" "), Just("\t"), Just("\r"), Just("\n"), Just(";"), Just(";;"), Just("&"),
+                Just("|"), Just("("), Just(")"), Just("<"), Just(">"), Just("<<"), Just("<<<"),
+                Just("<<-"), Just("'"), Just("\""), Just("\\"), Just("$("), Just("`"), Just("$'"),
+                Just("$"), Just("#"), Just("{"), Just("}"), Just("="), Just("~"), Just("é"),
+                Just("a"), Just("bin/x"), Just("EOF"), Just("bash"), Just("-c"), Just("sudo"),
+                Just("case"), Just("in"), Just("esac"), Just("cd"), Just("..")
+            ],
+            0..40,
+        )
+    ) {
+        let text = pieces.concat();
+        for found in spot(&text, "/work/app", &machine()) {
+            prop_assert!(found.span.end <= text.len());
+        }
+    }
+
     /// Every simple command's span is a piece of the script that starts at a word.
     #[test]
     fn every_span_is_inside_the_script(s in script()) {
